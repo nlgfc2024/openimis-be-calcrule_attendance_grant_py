@@ -1,0 +1,1 @@
+default_app_config = 'calcrule_attendance_grant.apps.CalcruleAttendanceGrantConfig'
