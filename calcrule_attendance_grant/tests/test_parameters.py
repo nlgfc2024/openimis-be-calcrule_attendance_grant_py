@@ -129,8 +129,8 @@ class GrantParametersTest(SimpleTestCase):
 
     def test_rejects_second_tranche_plans_until_supported(self):
         self.assert_configuration_error(
-            "second-tranche plans (requires_reconciled_payment_plan_id) are not supported yet",
-            rule=self.rule(requires_reconciled_payment_plan_id="5"),
+            "second-tranche plans (requires_reconciled_payment_plan_ids) are not supported yet",
+            rule=self.rule(requires_reconciled_payment_plan_ids=["5"]),
         )
 
     def test_lists_every_problem_with_the_plan_code(self):

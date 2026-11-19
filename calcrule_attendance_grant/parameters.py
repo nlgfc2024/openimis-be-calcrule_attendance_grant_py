@@ -56,9 +56,10 @@ class GrantParameters:
         rule = json_ext.get("calculation_rule")
         rule = rule if isinstance(rule, dict) else {}
 
-        if not _is_blank(rule.get("requires_reconciled_payment_plan_id")):
+        if any(not _is_blank(rule.get(key)) for key in (
+                "requires_reconciled_payment_plan_ids", "requires_reconciled_payment_plan_id")):
             errors.append(
-                "second-tranche plans (requires_reconciled_payment_plan_id) are not "
+                "second-tranche plans (requires_reconciled_payment_plan_ids) are not "
                 "supported yet"
             )
 
