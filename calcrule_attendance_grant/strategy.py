@@ -7,7 +7,7 @@ from payroll.models import BenefitConsumption, BenefitConsumptionStatus
 from payroll.services import BenefitConsumptionService, PayrollService
 from social_protection.models import Beneficiary, BeneficiaryStatus
 
-from calcrule_attendance_grant.amounts import resolve_grant_amount, tranche_amount
+from calcrule_attendance_grant.approval import plan_approval_shortfall
 from calcrule_attendance_grant.attendance import evaluate_attendance
 from calcrule_attendance_grant.converters import (
     BeneficiaryToBillConverter,
@@ -15,7 +15,8 @@ from calcrule_attendance_grant.converters import (
     GrantBenefitConverter,
 )
 from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
-from calcrule_attendance_grant.parameters import GrantParameters
+from calcrule_attendance_grant.grants import GRANT_COMPONENT_IN_KIND, GRANT_TYPES, IN_KIND_TYPES, resolve_grant
+from calcrule_attendance_grant.parameters import GRANT_SOURCE_PAYMENT_PLAN, GrantParameters
 
 logger = logging.getLogger(__name__)
 
@@ -54,16 +55,25 @@ class AttendanceGrantStrategy:
             if not participant.eligible:
                 cls._log_excluded(payment_plan, beneficiary, participant.reason)
                 continue
-            grant = resolve_grant_amount(beneficiary, params)
-            if grant.grant_amount is None:
+            shortfall = plan_approval_shortfall(beneficiary.json_ext)
+            if shortfall:
+                cls._log_excluded(payment_plan, beneficiary, shortfall)
+                continue
+            grant = resolve_grant(
+                beneficiary.json_ext,
+                allowed_grant_types=params.programme.allowed_grant_types,
+                grant_amount_source_is_plan=params.grant_amount_source == GRANT_SOURCE_PAYMENT_PLAN,
+                plan_grant_amount=params.grant_amount,
+                tranche_percentage=params.tranche_percentage,
+            )
+            if grant.reason:
                 cls._log_excluded(payment_plan, beneficiary, grant.reason, level=logging.WARNING)
                 continue
-            amount = tranche_amount(grant.grant_amount, params.tranche_percentage)
-            if amount <= 0:
+            amount = grant.part(params.grant_component)
+            if not amount:
                 cls._log_excluded(
                     payment_plan, beneficiary,
-                    f"the tranche of {grant.grant_amount} at {params.tranche_percentage}% rounds to 0",
-                    level=logging.WARNING,
+                    "its tranche has no %s part" % params.grant_component.replace("_", "-"),
                 )
                 continue
 
@@ -71,11 +81,8 @@ class AttendanceGrantStrategy:
                 payment_plan,
                 beneficiary=beneficiary,
                 amount=amount,
-                extra_info={
-                    "grant_amount": float(grant.grant_amount),
-                    "tranche_percentage": float(params.tranche_percentage),
-                    "tranche_amount": float(amount),
-                },
+                benefit_type="+".join(grant.part_types(params.grant_component)),
+                json_ext=cls._benefit_json_ext(params, grant),
                 user=user,
                 end_date=end_date,
                 payment_cycle=payment_cycle,
@@ -89,6 +96,39 @@ class AttendanceGrantStrategy:
             payment_plan.code, paid, len(beneficiaries),
         )
         return "Calculation and transformation into bills completed successfully."
+
+    @staticmethod
+    def _benefit_json_ext(params, grant):
+        """What the BenefitConsumption records about its tranche.
+
+        ``attendance_grant`` holds the whole tranche, so tranche two and reports can
+        read it; reconciliation replaces only ``extra_info``. ``extra_info`` holds what
+        the payroll's recipient needs, as columns of the reconciliation file: the
+        in-kind amounts for the PIU team.
+        """
+        amounts = {
+            "%s_amount" % grant_type.lower(): float(grant.amounts.get(grant_type, 0))
+            for grant_type in GRANT_TYPES
+        }
+        extra_info = {}
+        if params.grant_component == GRANT_COMPONENT_IN_KIND:
+            extra_info = {
+                "%s_amount" % grant_type.lower(): float(grant.amounts.get(grant_type, 0))
+                for grant_type in IN_KIND_TYPES
+                if grant_type in params.programme.allowed_grant_types
+            }
+        return {
+            "attendance_grant": {
+                "tranche": 1,
+                "grant_component": params.grant_component,
+                "grant_types": list(grant.grant_types),
+                "grant_amount": float(grant.grant_amount),
+                "tranche_percentage": float(grant.percentage),
+                "tranche_share": float(grant.share),
+                **amounts,
+            },
+            "extra_info": extra_info,
+        }
 
     @staticmethod
     def _beneficiaries(payment_plan, beneficiaries_queryset):
@@ -147,7 +187,8 @@ class AttendanceGrantStrategy:
             "user": user,
         }
         benefit_data = GrantBenefitConverter.to_grant_benefit_obj(
-            beneficiary, amount, payment_plan, payment_cycle, kwargs["extra_info"]
+            beneficiary, amount, payment_plan, payment_cycle,
+            kwargs["benefit_type"], kwargs["json_ext"],
         )
         cls._save(convert_results, benefit_data, amount, payroll, user, beneficiary)
 

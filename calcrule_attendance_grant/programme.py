@@ -6,11 +6,17 @@ shares them. The programme form edits them like ``data_source``.
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from calcrule_attendance_grant.grants import GRANT_TYPES
+
 TRAINING_DISQUALIFICATION_PERCENTAGE_KEY = "training_disqualification_percentage"
+ALLOWED_GRANT_TYPES_KEY = "allowed_grant_types"
 
 
 @dataclass(frozen=True)
 class ProgrammeSettings:
+    # Grant types the programme allows: CASH (UPG); CASH, EQUIPMENT (RMEP);
+    # CASH, EQUIPMENT, SERVICE (UMEP).
+    allowed_grant_types: tuple = ("CASH",)
     # Set for a programme (UMEP) that disqualifies participants when a training is
     # completed. Its trainings count only once COMPLETED.
     training_disqualification_percentage: Decimal = None
@@ -33,7 +39,20 @@ class ProgrammeSettings:
                     "the programme's %s must be a number above 0 and at most 100"
                     % TRAINING_DISQUALIFICATION_PERCENTAGE_KEY
                 )
-        return cls(training_disqualification_percentage=disqualification)
+
+        allowed = json_ext.get(ALLOWED_GRANT_TYPES_KEY)
+        if not isinstance(allowed, list) or not allowed or len(set(allowed)) != len(allowed) \
+                or any(grant_type not in GRANT_TYPES for grant_type in allowed):
+            errors.append(
+                "the programme's %s must list one or more of %s without repeats"
+                % (ALLOWED_GRANT_TYPES_KEY, ", ".join(GRANT_TYPES))
+            )
+            allowed = ()
+        allowed = tuple(grant_type for grant_type in GRANT_TYPES if grant_type in allowed)
+        return cls(
+            allowed_grant_types=allowed,
+            training_disqualification_percentage=disqualification,
+        )
 
 
 def _percentage(value):

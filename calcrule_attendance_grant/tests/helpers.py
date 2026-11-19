@@ -93,9 +93,9 @@ def attend(user, beneficiary, training, topics, percent_complete=100):
 
 def grant_parameters(**overrides):
     values = dict(
+        grant_component="cash",
         grant_amount_source="payment_plan",
         grant_amount=Decimal("1000"),
-        beneficiary_grant_amount_key="approved_grant_amount",
         tranche_percentage=Decimal("70"),
         minimum_attendance_percentage=Decimal("80"),
         programme=ProgrammeSettings(),

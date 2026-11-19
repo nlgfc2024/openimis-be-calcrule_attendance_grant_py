@@ -8,13 +8,13 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
+from calcrule_attendance_grant.grants import GRANT_COMPONENT_IN_KIND, GRANT_COMPONENTS, IN_KIND_TYPES
 from calcrule_attendance_grant.programme import ProgrammeSettings
 
 GRANT_SOURCE_PAYMENT_PLAN = "payment_plan"
 GRANT_SOURCE_BENEFICIARY_JSON = "beneficiary_json"
 GRANT_SOURCES = (GRANT_SOURCE_PAYMENT_PLAN, GRANT_SOURCE_BENEFICIARY_JSON)
 
-DEFAULT_BENEFICIARY_GRANT_AMOUNT_KEY = "approved_grant_amount"
 DEFAULT_TRANCHE_PERCENTAGE = Decimal("70")
 DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE = Decimal("80")
 
@@ -38,9 +38,10 @@ def _parse_decimal(value):
 
 @dataclass(frozen=True)
 class GrantParameters:
+    # "cash" or "in_kind": the part of each tranche this plan pays.
+    grant_component: str
     grant_amount_source: str
     grant_amount: Decimal
-    beneficiary_grant_amount_key: str
     tranche_percentage: Decimal
     minimum_attendance_percentage: Decimal
     # Settings of the programme (BenefitPlan) the plan pays.
@@ -68,6 +69,10 @@ class GrantParameters:
                 "supported yet"
             )
 
+        component = rule.get("grant_component")
+        if component not in GRANT_COMPONENTS:
+            errors.append("grant_component must be one of %s" % ", ".join(GRANT_COMPONENTS))
+
         source = rule.get("grant_amount_source")
         if source not in GRANT_SOURCES:
             errors.append(
@@ -83,14 +88,6 @@ class GrantParameters:
                     "is %s" % GRANT_SOURCE_PAYMENT_PLAN
                 )
 
-        amount_key = rule.get("beneficiary_grant_amount_key")
-        if _is_blank(amount_key):
-            amount_key = DEFAULT_BENEFICIARY_GRANT_AMOUNT_KEY
-        elif not isinstance(amount_key, str):
-            errors.append("beneficiary_grant_amount_key must be text")
-        else:
-            amount_key = amount_key.strip()
-
         tranche_percentage = cls._percentage(
             rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGE, errors
         )
@@ -101,6 +98,9 @@ class GrantParameters:
         # The modules come from each beneficiary's training, a tick always means
         # attended, and the programme decides which training status counts.
         programme = ProgrammeSettings.from_benefit_plan(payment_plan.benefit_plan, errors)
+        if component == GRANT_COMPONENT_IN_KIND and programme.allowed_grant_types and not any(
+                grant_type in programme.allowed_grant_types for grant_type in IN_KIND_TYPES):
+            errors.append("an in_kind plan needs a programme that allows EQUIPMENT or SERVICE")
 
         if errors:
             raise AttendanceGrantConfigurationError(
@@ -108,9 +108,9 @@ class GrantParameters:
                 % (payment_plan.code, "; ".join(errors))
             )
         return cls(
+            grant_component=component,
             grant_amount_source=source,
             grant_amount=grant_amount,
-            beneficiary_grant_amount_key=amount_key,
             tranche_percentage=tranche_percentage,
             minimum_attendance_percentage=minimum_attendance,
             programme=programme,
