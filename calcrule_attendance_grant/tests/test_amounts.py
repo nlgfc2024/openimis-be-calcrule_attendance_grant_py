@@ -14,11 +14,11 @@ def beneficiary(json_ext):
 class ResolveGrantAmountTest(SimpleTestCase):
     def setUp(self):
         self.from_beneficiary = grant_parameters(
-            [], grant_amount_source="beneficiary_json", grant_amount=None,
+            grant_amount_source="beneficiary_json", grant_amount=None,
         )
 
     def test_upg_uses_the_payment_plan_amount(self):
-        params = grant_parameters([], grant_amount=Decimal("500"))
+        params = grant_parameters(grant_amount=Decimal("500"))
         result = resolve_grant_amount(beneficiary({"approved_grant_amount": 9}), params)
         self.assertEqual(result.grant_amount, Decimal("500"))
 
@@ -33,7 +33,7 @@ class ResolveGrantAmountTest(SimpleTestCase):
 
     def test_the_amount_key_is_configurable(self):
         params = grant_parameters(
-            [], grant_amount_source="beneficiary_json", beneficiary_grant_amount_key="contribution",
+            grant_amount_source="beneficiary_json", beneficiary_grant_amount_key="contribution",
         )
         result = resolve_grant_amount(beneficiary({"contribution": 800}), params)
         self.assertEqual(result.grant_amount, Decimal("800"))

@@ -3,168 +3,125 @@ from decimal import Decimal
 from django.test import TestCase
 
 from core.test_helpers import LogInHelper
-from social_protection.models import GroupBeneficiary, BeneficiaryStatus
-from social_protection.tests.test_helpers import create_benefit_plan, create_group_with_individual
-from project_social_protection.models import (
-    GroupBeneficiaryProjectEnrollment,
-    GroupBeneficiaryProjectTimeEntry,
-    BeneficiaryProjectTimeEntry,
-    ProjectStatus,
-)
-from project_social_protection.tests.test_helpers import find_or_create_activity
+from project_social_protection.models import BeneficiaryProjectTimeEntry, ProjectStatus
 
 from calcrule_attendance_grant.attendance import evaluate_attendance
 from calcrule_attendance_grant.tests.helpers import (
     attend,
     create_individual_benefit_plan,
+    create_module,
     create_participant,
-    create_session,
-    grant_parameters,
+    create_training,
 )
 
 
 class EvaluateAttendanceTest(TestCase):
+    """An RMEP-like programme: module A has 5 topics and module B has 10."""
+
     @classmethod
     def setUpTestData(cls):
         cls.user = LogInHelper().get_or_create_user_api()
         cls.benefit_plan = create_individual_benefit_plan(cls.user, 'AGATT')
-        cls.module_1 = find_or_create_activity("Attendance module 1", cls.user.username)
-        cls.module_2 = find_or_create_activity("Attendance module 2", cls.user.username)
-        cls.session_1 = create_session(cls.user, cls.benefit_plan, cls.module_1, 'Module 1 - A')
-        cls.session_2 = create_session(cls.user, cls.benefit_plan, cls.module_2, 'Module 2 - A')
-        cls.params = grant_parameters([cls.module_1, cls.module_2])
+        cls.module_a = create_module(cls.user, cls.benefit_plan, "Attendance module A", 5, "AGA")
+        cls.module_b = create_module(cls.user, cls.benefit_plan, "Attendance module B", 10, "AGB")
+        cls.training = create_training(cls.user, cls.benefit_plan, [cls.module_a, cls.module_b], 'Training 1')
 
     def participant(self, name):
         return create_participant(self.user, self.benefit_plan, name)
 
-    def evaluate(self, beneficiary, **overrides):
-        params = grant_parameters([self.module_1, self.module_2], **overrides) if overrides else self.params
-        return evaluate_attendance([beneficiary.id], self.benefit_plan, params)[beneficiary.id]
+    def evaluate(self, beneficiary, minimum=Decimal("80"), completed_only=False):
+        return evaluate_attendance(
+            [beneficiary.id], self.benefit_plan, minimum, completed_only,
+        )[str(beneficiary.id)]
 
-    def test_full_attendance_of_every_module_is_eligible(self):
+    def test_every_module_meeting_the_minimum_is_eligible(self):
         beneficiary = self.participant('Full')
-        attend(self.user, beneficiary, self.session_1, 5)
-        attend(self.user, beneficiary, self.session_2, 5)
+        attend(self.user, beneficiary, self.training, list(range(1, 5)) + list(range(6, 14)))
         result = self.evaluate(beneficiary)
         self.assertTrue(result.eligible, result.reason)
-        self.assertEqual(result.modules[str(self.module_1.id)].completion_percentage, 100)
-
-    def test_the_minimum_percentage_is_inclusive(self):
-        beneficiary = self.participant('Boundary')
-        attend(self.user, beneficiary, self.session_1, 4)
-        attend(self.user, beneficiary, self.session_2, 4)
-        self.assertTrue(self.evaluate(beneficiary).eligible)
+        self.assertEqual(
+            [(m.module_name, m.ticked_topics, m.total_topics) for m in result.modules.values()],
+            [("Attendance module A", 4, 5), ("Attendance module B", 8, 10)],
+        )
 
     def test_one_module_cannot_compensate_for_another(self):
         beneficiary = self.participant('Compensate')
-        attend(self.user, beneficiary, self.session_1, 5)
-        attend(self.user, beneficiary, self.session_2, 3)
+        # All of module A and 7 of module B's 10 topics: 12 of 15 overall is 80%.
+        attend(self.user, beneficiary, self.training, 12)
         result = self.evaluate(beneficiary)
         self.assertFalse(result.eligible)
         self.assertEqual(
             result.reason,
-            "module 'Attendance module 2': attended 3 of 5 days (60.0%), below 80%",
+            "module 'Attendance module B': attended 7 of 10 topics (70.0%), below 80%",
         )
 
-    def test_a_missing_module_enrollment_is_a_shortfall(self):
-        beneficiary = self.participant('Missing')
-        attend(self.user, beneficiary, self.session_1, 5)
-        result = self.evaluate(beneficiary)
-        self.assertEqual(
-            result.reason,
-            "module 'Attendance module 2': not enrolled in a completed training session",
-        )
+    def test_unticked_and_deleted_ticks_do_not_count(self):
+        beneficiary = self.participant('Unticked')
+        enrollment = attend(self.user, beneficiary, self.training, 15)
+        BeneficiaryProjectTimeEntry.objects.filter(enrollment=enrollment, day_number=1).update(percent_complete=0)
+        BeneficiaryProjectTimeEntry.objects.get(enrollment=enrollment, day_number=2).delete(user=self.user)
+        module_a = self.evaluate(beneficiary).modules[str(self.module_a.id)]
+        self.assertEqual(module_a.ticked_topics, 3)
 
-    def test_partial_days_count_only_from_the_attended_day_threshold(self):
-        beneficiary = self.participant('Partial')
-        attend(self.user, beneficiary, self.session_1, 5, percent_complete=50)
-        attend(self.user, beneficiary, self.session_2, 5)
-        self.assertFalse(self.evaluate(beneficiary).eligible)
-        self.assertTrue(self.evaluate(beneficiary, attended_day_threshold=50).eligible)
+    def test_no_training_enrollment_is_a_shortfall(self):
+        result = self.evaluate(self.participant('NotEnrolled'))
+        self.assertEqual(result.reason, "not enrolled in a training of the programme")
 
-    def test_deleted_and_out_of_range_entries_are_ignored(self):
-        beneficiary = self.participant('Ignored')
-        enrollment = attend(self.user, beneficiary, self.session_1, [1, 2, 3, 6, 7])
-        entry = BeneficiaryProjectTimeEntry.objects.get(enrollment=enrollment, day_number=3)
-        entry.delete(user=self.user)
-        attend(self.user, beneficiary, self.session_2, 5)
-        module_1 = self.evaluate(beneficiary).modules[str(self.module_1.id)]
-        self.assertEqual((module_1.attended_days, module_1.scheduled_days), (2, 5))
-
-    def test_only_completed_sessions_count_unless_the_plan_says_otherwise(self):
+    def test_training_status_does_not_matter_by_default(self):
         beneficiary = self.participant('InProgress')
-        in_progress = create_session(
-            self.user, self.benefit_plan, self.module_1, 'Module 1 - running',
+        running = create_training(
+            self.user, self.benefit_plan, [self.module_a, self.module_b], 'Training running',
             status=ProjectStatus.IN_PROGRESS,
         )
-        attend(self.user, beneficiary, in_progress, 5)
-        attend(self.user, beneficiary, self.session_2, 5)
-        self.assertIn("not enrolled in a completed training session", self.evaluate(beneficiary).reason)
-        self.assertTrue(self.evaluate(beneficiary, only_completed_sessions=False).eligible)
+        attend(self.user, beneficiary, running, 15)
+        self.assertTrue(self.evaluate(beneficiary).eligible)
+
+    def test_only_completed_trainings_count_when_the_programme_says_so(self):
+        beneficiary = self.participant('UmepRunning')
+        running = create_training(
+            self.user, self.benefit_plan, [self.module_a, self.module_b], 'Training running 2',
+            status=ProjectStatus.IN_PROGRESS,
+        )
+        attend(self.user, beneficiary, running, 15)
+        self.assertEqual(
+            self.evaluate(beneficiary, completed_only=True).reason,
+            "not enrolled in a completed training of the programme",
+        )
 
     def test_work_projects_and_other_programmes_do_not_count(self):
         beneficiary = self.participant('Elsewhere')
-        work = create_session(
-            self.user, self.benefit_plan, self.module_1, 'Module 1 - work project',
+        work = create_training(
+            self.user, self.benefit_plan, [self.module_a, self.module_b], 'Work project',
             project_type='WORK',
         )
         other_plan = create_individual_benefit_plan(self.user, 'AGOTHER')
-        other_session = create_session(self.user, other_plan, self.module_2, 'Other programme')
-        attend(self.user, beneficiary, work, 5)
-        attend(self.user, beneficiary, other_session, 5)
-        result = self.evaluate(beneficiary)
-        self.assertEqual(len(result.shortfalls), 2)
+        other_training = create_training(self.user, other_plan, [self.module_a, self.module_b], 'Other')
+        attend(self.user, beneficiary, work, 15)
+        attend(self.user, beneficiary, other_training, 15)
+        self.assertEqual(self.evaluate(beneficiary).reason, "not enrolled in a training of the programme")
 
-    def test_the_best_session_of_a_repeated_module_counts(self):
+    def test_each_module_takes_its_best_result_across_trainings(self):
         beneficiary = self.participant('Repeated')
-        retake = create_session(self.user, self.benefit_plan, self.module_1, 'Module 1 - B', working_days=4)
-        attend(self.user, beneficiary, self.session_1, 1)
-        attend(self.user, beneficiary, retake, 4)
-        attend(self.user, beneficiary, self.session_2, 5)
+        later = create_training(self.user, self.benefit_plan, [self.module_a, self.module_b], 'Training 2')
+        attend(self.user, beneficiary, self.training, 5)  # all of A, none of B
+        attend(self.user, beneficiary, later, list(range(6, 16)))  # none of A, all of B
         result = self.evaluate(beneficiary)
         self.assertTrue(result.eligible, result.reason)
-        self.assertEqual(result.modules[str(self.module_1.id)].scheduled_days, 4)
 
-    def test_participants_are_evaluated_independently(self):
+    def test_beneficiaries_are_evaluated_independently(self):
         full = self.participant('IndependentFull')
         short = self.participant('IndependentShort')
-        for beneficiary, days in ((full, 5), (short, 2)):
-            attend(self.user, beneficiary, self.session_1, days)
-            attend(self.user, beneficiary, self.session_2, 5)
-        results = evaluate_attendance([full.id, short.id], self.benefit_plan, self.params)
-        self.assertTrue(results[full.id].eligible)
-        self.assertFalse(results[short.id].eligible)
+        attend(self.user, full, self.training, 15)
+        attend(self.user, short, self.training, 3)
+        results = evaluate_attendance([full.id, short.id], self.benefit_plan, Decimal("80"), False)
+        self.assertTrue(results[str(full.id)].eligible)
+        self.assertEqual(len(results[str(short.id)].shortfalls), 2)
 
-    def test_group_time_entries_are_not_participant_evidence(self):
-        group_plan = create_benefit_plan(
-            self.user.username, payload_override={'code': 'AGGRP', 'type': 'GROUP'}
-        )
-        individual, group, _ = create_group_with_individual(self.user.username, {'code': 'AGGRP1'})
-        group_beneficiary = GroupBeneficiary(
-            group=group, benefit_plan=group_plan, status=BeneficiaryStatus.ACTIVE,
-        )
-        group_beneficiary.save(user=self.user)
-        beneficiary = self.participant('GroupMember')
-        for session in (self.session_1, self.session_2):
-            group_enrollment = GroupBeneficiaryProjectEnrollment(
-                group_beneficiary=group_beneficiary, project=session,
-            )
-            group_enrollment.save(user=self.user)
-            for day_number in range(1, 6):
-                GroupBeneficiaryProjectTimeEntry(
-                    enrollment=group_enrollment, day_number=day_number, percent_complete=100,
-                ).save(user=self.user)
-        result = self.evaluate(beneficiary)
-        self.assertFalse(result.eligible)
-        self.assertEqual(len(result.shortfalls), 2)
-
-    def test_fractional_minimum_in_the_reason(self):
+    def test_the_minimum_is_inclusive_and_shown_without_trailing_zeros(self):
         beneficiary = self.participant('Fraction')
-        attend(self.user, beneficiary, self.session_1, 3)
-        attend(self.user, beneficiary, self.session_2, 5)
-        result = self.evaluate(beneficiary, minimum_attendance_percentage=Decimal("62.50"))
+        attend(self.user, beneficiary, self.training, [1, 2, 3] + list(range(6, 16)))
+        self.assertTrue(self.evaluate(beneficiary, minimum=Decimal("60")).eligible)
         self.assertEqual(
-            result.reason,
-            "module 'Attendance module 1': attended 3 of 5 days (60.0%), below 62.5%",
+            self.evaluate(beneficiary, minimum=Decimal("62.50")).reason,
+            "module 'Attendance module A': attended 3 of 5 topics (60.0%), below 62.5%",
         )
-        self.assertTrue(self.evaluate(beneficiary, minimum_attendance_percentage=Decimal("60")).eligible)

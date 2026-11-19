@@ -1,35 +1,25 @@
 from decimal import Decimal
 from types import SimpleNamespace
 
-from django.test import TestCase
-
-from core.test_helpers import LogInHelper
-from project_social_protection.tests.test_helpers import find_or_create_activity
+from django.test import SimpleTestCase
 
 from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
 from calcrule_attendance_grant.parameters import GrantParameters
 
 
-def payment_plan_stub(rule, benefit_plan_type="INDIVIDUAL", code="PP-AG"):
+def payment_plan_stub(rule, benefit_plan_type="INDIVIDUAL", code="PP-AG", programme=None):
     return SimpleNamespace(
         code=code,
         json_ext={"calculation_rule": rule},
-        benefit_plan=SimpleNamespace(type=benefit_plan_type),
+        benefit_plan=SimpleNamespace(type=benefit_plan_type, json_ext=programme or {}),
     )
 
 
-class GrantParametersTest(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        user = LogInHelper().get_or_create_user_api()
-        cls.module_1 = find_or_create_activity("Grant parameters module 1", user.username)
-        cls.module_2 = find_or_create_activity("Grant parameters module 2", user.username)
-
+class GrantParametersTest(SimpleTestCase):
     def rule(self, **overrides):
         return {
             "grant_amount_source": "payment_plan",
             "grant_amount": "1500",
-            "required_activity_ids": [str(self.module_1.id)],
             **overrides,
         }
 
@@ -50,26 +40,27 @@ class GrantParametersTest(TestCase):
         self.assertEqual(params.beneficiary_grant_amount_key, "approved_grant_amount")
         self.assertEqual(params.tranche_percentage, Decimal("70"))
         self.assertEqual(params.minimum_attendance_percentage, Decimal("80"))
-        self.assertEqual(params.attended_day_threshold, 100)
-        self.assertTrue(params.only_completed_sessions)
-        self.assertEqual(params.required_activity_ids, (str(self.module_1.id),))
+        self.assertFalse(params.programme.counts_completed_trainings_only)
 
     def test_reads_values_stored_as_text_by_the_payment_plan_ui(self):
-        params = self.parse(
-            tranche_percentage="30", minimum_attendance_percentage="75.5",
-            attended_day_threshold="50", only_completed_sessions="false",
-            required_activity_ids=f"{self.module_1.id}, {self.module_2.id}",
-        )
+        params = self.parse(tranche_percentage="30", minimum_attendance_percentage="75.5")
         self.assertEqual(params.tranche_percentage, Decimal("30"))
         self.assertEqual(params.minimum_attendance_percentage, Decimal("75.5"))
-        self.assertEqual(params.attended_day_threshold, 50)
-        self.assertFalse(params.only_completed_sessions)
-        self.assertEqual(
-            params.required_activity_ids, (str(self.module_1.id), str(self.module_2.id))
-        )
 
-    def test_fractional_attended_day_threshold_rounds_up(self):
-        self.assertEqual(self.parse(attended_day_threshold=79.5).attended_day_threshold, 80)
+    def test_reads_the_programme_disqualification_percentage(self):
+        for value in (90, "90"):
+            with self.subTest(value=value):
+                plan = payment_plan_stub(
+                    self.rule(), programme={"training_disqualification_percentage": value})
+                programme = GrantParameters.from_payment_plan(plan).programme
+                self.assertEqual(programme.training_disqualification_percentage, Decimal("90"))
+                self.assertTrue(programme.counts_completed_trainings_only)
+
+    def test_rejects_an_invalid_programme_disqualification_percentage(self):
+        self.assert_configuration_error(
+            "the programme's training_disqualification_percentage must be a number above 0 and at most 100",
+            programme={"training_disqualification_percentage": "ninety"},
+        )
 
     def test_beneficiary_json_source_uses_the_amount_key(self):
         params = self.parse(
@@ -96,34 +87,13 @@ class GrantParametersTest(TestCase):
                 )
 
     def test_rejects_out_of_range_percentages(self):
-        for name in ("tranche_percentage", "minimum_attendance_percentage", "attended_day_threshold"):
+        for name in ("tranche_percentage", "minimum_attendance_percentage"):
             for value in ("0", "100.5", "-1", "x", False):
                 with self.subTest(name=name, value=value):
                     self.assert_configuration_error(
                         f"{name} must be a number above 0 and at most 100",
                         rule=self.rule(**{name: value}),
                     )
-
-    def test_rejects_an_invalid_completed_sessions_flag(self):
-        self.assert_configuration_error(
-            "only_completed_sessions must be true or false",
-            rule=self.rule(only_completed_sessions="yes"),
-        )
-
-    def test_rejects_missing_invalid_or_unknown_activity_ids(self):
-        self.assert_configuration_error(
-            "required_activity_ids must list at least one Activity ID",
-            rule=self.rule(required_activity_ids=[]),
-        )
-        self.assert_configuration_error(
-            "required_activity_ids has invalid IDs: not-an-id",
-            rule=self.rule(required_activity_ids=["not-an-id"]),
-        )
-        unknown = "00000000-0000-0000-0000-000000000001"
-        self.assert_configuration_error(
-            f"refers to Activities that do not exist: {unknown}",
-            rule=self.rule(required_activity_ids=[str(self.module_1.id), unknown]),
-        )
 
     def test_rejects_group_benefit_plans(self):
         self.assert_configuration_error(
@@ -140,12 +110,12 @@ class GrantParametersTest(TestCase):
     def test_lists_every_problem_with_the_plan_code(self):
         message = self.assert_configuration_error(
             "Payment plan PP-AG cannot be calculated",
-            rule={"grant_amount_source": "payment_plan"},
+            rule={"grant_amount_source": "payment_plan", "tranche_percentage": "0"},
         )
         self.assertIn("grant_amount must be a positive number", message)
-        self.assertIn("required_activity_ids must list at least one Activity ID", message)
+        self.assertIn("tranche_percentage must be a number", message)
 
     def test_rejects_a_plan_without_rule_parameters(self):
-        plan = SimpleNamespace(code="PP-EMPTY", json_ext=None, benefit_plan=SimpleNamespace(type="INDIVIDUAL"))
+        plan = SimpleNamespace(code="PP-EMPTY", json_ext=None, benefit_plan=SimpleNamespace(type="INDIVIDUAL", json_ext={}))
         with self.assertRaises(AttendanceGrantConfigurationError):
             GrantParameters.from_payment_plan(plan)

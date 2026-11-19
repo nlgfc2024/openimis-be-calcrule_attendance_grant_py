@@ -18,15 +18,15 @@ from payroll.models import (
     PayrollBenefitConsumption,
 )
 from social_protection.models import Beneficiary, BenefitPlan
-from project_social_protection.tests.test_helpers import find_or_create_activity
 
 from calcrule_attendance_grant.calculation_rule import AttendanceGrantCalculationRule
 from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
 from calcrule_attendance_grant.tests.helpers import (
     attend,
     create_individual_benefit_plan,
+    create_module,
     create_participant,
-    create_session,
+    create_training,
 )
 
 STRATEGY_LOGGER = "calcrule_attendance_grant.strategy"
@@ -50,10 +50,9 @@ class AttendanceGrantCalculationTest(TestCase):
     def setUpTestData(cls):
         cls.user = LogInHelper().get_or_create_user_api()
         cls.benefit_plan = create_individual_benefit_plan(cls.user, 'AGRUN')
-        cls.module_1 = find_or_create_activity("Grant run module 1", cls.user.username)
-        cls.module_2 = find_or_create_activity("Grant run module 2", cls.user.username)
-        cls.session_1 = create_session(cls.user, cls.benefit_plan, cls.module_1, 'Grant run module 1')
-        cls.session_2 = create_session(cls.user, cls.benefit_plan, cls.module_2, 'Grant run module 2')
+        cls.module_1 = create_module(cls.user, cls.benefit_plan, "Grant run module 1", 5, "AGR1")
+        cls.module_2 = create_module(cls.user, cls.benefit_plan, "Grant run module 2", 5, "AGR2")
+        cls.training = create_training(cls.user, cls.benefit_plan, [cls.module_1, cls.module_2], 'Grant run')
         cls.payment_cycle = PaymentCycle(
             start_date='2026-11-01', end_date='2026-11-30',
             type=ContentType.objects.get_for_model(BenefitPlan), code='AG-2026-11',
@@ -62,10 +61,8 @@ class AttendanceGrantCalculationTest(TestCase):
 
         cls.graduate = cls.participant('Graduate', {"approved_grant_amount": 1500})
         cls.dropout = cls.participant('Dropout', {"approved_grant_amount": 1500})
-        attend(cls.user, cls.graduate, cls.session_1, 5)
-        attend(cls.user, cls.graduate, cls.session_2, 5)
-        attend(cls.user, cls.dropout, cls.session_1, 5)
-        attend(cls.user, cls.dropout, cls.session_2, 2)
+        attend(cls.user, cls.graduate, cls.training, 10)
+        attend(cls.user, cls.dropout, cls.training, 7)
 
     @classmethod
     def participant(cls, name, json_ext=None):
@@ -81,7 +78,6 @@ class AttendanceGrantCalculationTest(TestCase):
             json_ext={"calculation_rule": {
                 "grant_amount_source": "payment_plan",
                 "grant_amount": "1000",
-                "required_activity_ids": [str(self.module_1.id), str(self.module_2.id)],
                 **rule,
             }},
         )
@@ -126,7 +122,7 @@ class AttendanceGrantCalculationTest(TestCase):
         output = "\n".join(logs.output)
         self.assertIn(
             f"beneficiary {self.dropout.id} (individual {self.dropout.individual_id}) not paid: "
-            "module 'Grant run module 2': attended 2 of 5 days (40.0%), below 80%",
+            "module 'Grant run module 2': attended 2 of 5 topics (40.0%), below 80%",
             output,
         )
         self.assertIn("1 of 2 participant(s) paid", output)
@@ -151,8 +147,7 @@ class AttendanceGrantCalculationTest(TestCase):
         participants = {}
         for name, json_ext in cases.items():
             participants[name] = self.participant(name, json_ext)
-            attend(self.user, participants[name], self.session_1, 5)
-            attend(self.user, participants[name], self.session_2, 5)
+            attend(self.user, participants[name], self.training, 10)
         plan = self.payment_plan(grant_amount_source="beneficiary_json", tranche_percentage="30")
         with self.assertLogs(STRATEGY_LOGGER, level="WARNING") as logs:
             payroll = self.run_payroll(plan)

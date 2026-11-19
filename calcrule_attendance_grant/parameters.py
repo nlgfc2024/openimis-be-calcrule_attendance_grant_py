@@ -4,11 +4,11 @@ The Payment Plan UI stores the rule's parameters under
 ``PaymentPlan.json_ext["calculation_rule"]``, usually as text. This module is the
 single place that names them, applies their defaults and validates them.
 """
-import uuid
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 
 from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
+from calcrule_attendance_grant.programme import ProgrammeSettings
 
 GRANT_SOURCE_PAYMENT_PLAN = "payment_plan"
 GRANT_SOURCE_BENEFICIARY_JSON = "beneficiary_json"
@@ -17,8 +17,6 @@ GRANT_SOURCES = (GRANT_SOURCE_PAYMENT_PLAN, GRANT_SOURCE_BENEFICIARY_JSON)
 DEFAULT_BENEFICIARY_GRANT_AMOUNT_KEY = "approved_grant_amount"
 DEFAULT_TRANCHE_PERCENTAGE = Decimal("70")
 DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE = Decimal("80")
-DEFAULT_ATTENDED_DAY_THRESHOLD = 100
-DEFAULT_ONLY_COMPLETED_SESSIONS = True
 
 INDIVIDUAL_BENEFIT_PLAN = "INDIVIDUAL"
 
@@ -38,23 +36,6 @@ def _parse_decimal(value):
     return number if number.is_finite() else None
 
 
-def _parse_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
-        return value.strip().lower() == "true"
-    return None
-
-
-def _parse_ids(value):
-    """Activity IDs from a list or from comma-separated text."""
-    if isinstance(value, str):
-        value = value.split(",")
-    if not isinstance(value, (list, tuple)):
-        return None
-    return [str(item).strip() for item in value if not _is_blank(str(item))]
-
-
 @dataclass(frozen=True)
 class GrantParameters:
     grant_amount_source: str
@@ -62,9 +43,8 @@ class GrantParameters:
     beneficiary_grant_amount_key: str
     tranche_percentage: Decimal
     minimum_attendance_percentage: Decimal
-    attended_day_threshold: int
-    required_activity_ids: tuple
-    only_completed_sessions: bool
+    # Settings of the programme (BenefitPlan) the plan pays.
+    programme: ProgrammeSettings = ProgrammeSettings()
 
     @classmethod
     def from_payment_plan(cls, payment_plan):
@@ -118,19 +98,9 @@ class GrantParameters:
             rule, "minimum_attendance_percentage",
             DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE, errors,
         )
-        attended_day_threshold = cls._percentage(
-            rule, "attended_day_threshold", Decimal(DEFAULT_ATTENDED_DAY_THRESHOLD), errors
-        )
-
-        only_completed = rule.get("only_completed_sessions")
-        if _is_blank(only_completed):
-            only_completed = DEFAULT_ONLY_COMPLETED_SESSIONS
-        else:
-            only_completed = _parse_bool(only_completed)
-            if only_completed is None:
-                errors.append("only_completed_sessions must be true or false")
-
-        activity_ids = cls._activity_ids(rule.get("required_activity_ids"), errors)
+        # The modules come from each beneficiary's training, a tick always means
+        # attended, and the programme decides which training status counts.
+        programme = ProgrammeSettings.from_benefit_plan(payment_plan.benefit_plan, errors)
 
         if errors:
             raise AttendanceGrantConfigurationError(
@@ -143,11 +113,7 @@ class GrantParameters:
             beneficiary_grant_amount_key=amount_key,
             tranche_percentage=tranche_percentage,
             minimum_attendance_percentage=minimum_attendance,
-            # percent_complete is a whole number, so a fractional threshold
-            # behaves like the next whole number.
-            attended_day_threshold=int(attended_day_threshold.to_integral_value(rounding=ROUND_CEILING)),
-            required_activity_ids=activity_ids,
-            only_completed_sessions=only_completed,
+            programme=programme,
         )
 
     @staticmethod
@@ -161,35 +127,3 @@ class GrantParameters:
             errors.append(f"{name} must be a number above 0 and at most 100")
             return default
         return number
-
-    @staticmethod
-    def _activity_ids(value, errors):
-        from project_social_protection.models import Activity
-
-        ids = _parse_ids(value) if not _is_blank(value) else []
-        if not ids:
-            errors.append("required_activity_ids must list at least one Activity ID")
-            return ()
-        invalid = []
-        for activity_id in ids:
-            try:
-                uuid.UUID(activity_id)
-            except ValueError:
-                invalid.append(activity_id)
-        if invalid:
-            errors.append("required_activity_ids has invalid IDs: %s" % ", ".join(invalid))
-            return ()
-        found = {
-            str(pk) for pk in Activity.objects.filter(
-                id__in=ids, is_deleted=False
-            ).values_list("id", flat=True)
-        }
-        missing = [activity_id for activity_id in ids if str(uuid.UUID(activity_id)) not in found]
-        if missing:
-            errors.append(
-                "required_activity_ids refers to Activities that do not exist: %s"
-                % ", ".join(missing)
-            )
-            return ()
-        # Keep the plan's order and drop repeats.
-        return tuple(dict.fromkeys(str(uuid.UUID(activity_id)) for activity_id in ids))

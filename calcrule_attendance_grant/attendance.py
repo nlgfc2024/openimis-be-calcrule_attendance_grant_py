@@ -1,50 +1,54 @@
-"""Training completion per participant and required module.
+"""Training completion per beneficiary and module.
 
-For each required Activity (training module), a participant's completion is
+A training always covers all of its programme's modules, and its attendance sheet
+has one column per topic. For each module of the beneficiary's training
 
-    attended days / scheduled days * 100
+    ticked topics of the module / topics of the module * 100
 
-for a training session of that module they are enrolled in, where an attended day
-is a time entry whose percent_complete reaches the plan's attended-day threshold.
-Modules are evaluated independently: attendance in one module never compensates
-for missed days in another. If the participant is enrolled in several sessions of
-the same module (for example after repeating it), the best session counts.
+must reach the plan's minimum. Modules are evaluated independently: topics attended
+in one module never compensate for topics missed in another. The per-module figures
+come from the project module's shared helper, so the payroll agrees with the
+attendance grid. If a beneficiary has several trainings of the programme, each
+module's best result counts.
 
-Only individual enrollments are read. Group-level time entries are never used as
-evidence of a participant's attendance.
+Attendance is read from the beneficiary's own enrollments: the household's for a
+GROUP programme (its primary worker attends), the individual's for an INDIVIDUAL one.
 """
 from dataclasses import dataclass, field
 
-from django.db.models import Count, F, Q
-
 from project_social_protection.models import (
-    Activity,
     BeneficiaryProjectEnrollment,
+    GroupBeneficiaryProjectEnrollment,
     ProjectStatus,
 )
+from project_social_protection.training_topics import training_module_completion
 
-# Project.project_type of a training session.
+# Project.project_type of a training.
 TRAINING_PROJECT_TYPE = "TRAINING"
+GROUP_BENEFIT_PLAN = "GROUP"
 
 
 @dataclass(frozen=True)
-class ModuleAttendance:
-    activity_name: str
-    scheduled_days: int
-    attended_days: int
+class ModuleCompletion:
+    module_name: str
+    ticked_topics: int
+    total_topics: int
 
     @property
-    def completion_percentage(self):
-        return self.attended_days * 100 / self.scheduled_days
+    def percentage(self):
+        return self.ticked_topics * 100 / self.total_topics
 
     def meets(self, minimum_percentage):
         # Compare whole numbers so a boundary value is never lost to rounding.
-        return self.attended_days * 100 >= minimum_percentage * self.scheduled_days
+        return self.ticked_topics * 100 >= minimum_percentage * self.total_topics
+
+    def beats(self, other):
+        return self.ticked_topics * other.total_topics > other.ticked_topics * self.total_topics
 
 
 @dataclass
-class ParticipantAttendance:
-    # Best session per required Activity ID the participant attended.
+class BeneficiaryAttendance:
+    # Best result per module ID, in sheet order.
     modules: dict = field(default_factory=dict)
     shortfalls: list = field(default_factory=list)
 
@@ -57,69 +61,56 @@ class ParticipantAttendance:
         return "; ".join(self.shortfalls)
 
 
-def evaluate_attendance(beneficiary_ids, benefit_plan, params):
-    """Return {beneficiary_id: ParticipantAttendance} for a list of beneficiary IDs."""
-    activity_names = dict(
-        Activity.objects.filter(id__in=params.required_activity_ids).values_list("id", "name")
-    )
-    activity_names = {str(activity_id): name for activity_id, name in activity_names.items()}
+def evaluate_attendance(beneficiary_ids, benefit_plan, minimum_percentage, completed_only):
+    """Return {str(beneficiary_id): BeneficiaryAttendance}.
 
-    enrollments = BeneficiaryProjectEnrollment.objects.filter(
-        beneficiary_id__in=beneficiary_ids,
+    ``beneficiary_ids`` are Beneficiary IDs for an INDIVIDUAL programme and
+    GroupBeneficiary IDs for a GROUP one.
+    """
+    if benefit_plan.type == GROUP_BENEFIT_PLAN:
+        enrollment_model, beneficiary_field = GroupBeneficiaryProjectEnrollment, "group_beneficiary_id"
+    else:
+        enrollment_model, beneficiary_field = BeneficiaryProjectEnrollment, "beneficiary_id"
+
+    enrollments = enrollment_model.objects.filter(
+        **{f"{beneficiary_field}__in": beneficiary_ids},
         is_deleted=False,
         project__is_deleted=False,
         project__benefit_plan=benefit_plan,
         project__project_type=TRAINING_PROJECT_TYPE,
-        project__activity_id__in=params.required_activity_ids,
-        project__working_days__gt=0,
-    )
-    if params.only_completed_sessions:
+    ).select_related("project").order_by("project__date_created", "id")
+    if completed_only:
         enrollments = enrollments.filter(project__status=ProjectStatus.COMPLETED)
-    rows = enrollments.annotate(
-        attended_days=Count(
-            "time_entries",
-            filter=Q(
-                time_entries__is_deleted=False,
-                time_entries__percent_complete__gte=params.attended_day_threshold,
-                time_entries__day_number__gte=1,
-                time_entries__day_number__lte=F("project__working_days"),
-            ),
-        )
-    ).values_list("beneficiary_id", "project__activity_id", "project__working_days", "attended_days")
 
-    best_sessions = {}
-    for beneficiary_id, activity_id, working_days, attended_days in rows:
-        activity_id = str(activity_id)
-        session = ModuleAttendance(
-            activity_name=activity_names.get(activity_id, activity_id),
-            scheduled_days=working_days,
-            attended_days=attended_days,
-        )
-        key = (beneficiary_id, activity_id)
-        best = best_sessions.get(key)
-        if best is None or session.attended_days * best.scheduled_days > best.attended_days * session.scheduled_days:
-            best_sessions[key] = session
-
-    session_kind = "completed training session" if params.only_completed_sessions else "training session"
-    results = {}
-    for beneficiary_id in beneficiary_ids:
-        result = ParticipantAttendance()
-        for activity_id in params.required_activity_ids:
-            session = best_sessions.get((beneficiary_id, activity_id))
-            name = activity_names.get(activity_id, activity_id)
-            if session is None:
-                result.shortfalls.append(f"module '{name}': not enrolled in a {session_kind}")
+    results = {str(beneficiary_id): BeneficiaryAttendance() for beneficiary_id in beneficiary_ids}
+    for enrollment in enrollments:
+        result = results[str(getattr(enrollment, beneficiary_field))]
+        for row in training_module_completion(enrollment):
+            if not row["total_topics"]:
                 continue
-            result.modules[activity_id] = session
-            if not session.meets(params.minimum_attendance_percentage):
+            completion = ModuleCompletion(
+                module_name=row["module"]["name"],
+                ticked_topics=row["ticked_topics"],
+                total_topics=row["total_topics"],
+            )
+            module_id = str(row["module"]["id"])
+            best = result.modules.get(module_id)
+            if best is None or completion.beats(best):
+                result.modules[module_id] = completion
+
+    training_kind = "completed training" if completed_only else "training"
+    for result in results.values():
+        if not result.modules:
+            result.shortfalls.append(f"not enrolled in a {training_kind} of the programme")
+            continue
+        for completion in result.modules.values():
+            if not completion.meets(minimum_percentage):
                 result.shortfalls.append(
-                    "module '%s': attended %s of %s days (%.1f%%), below %s%%" % (
-                        name, session.attended_days, session.scheduled_days,
-                        session.completion_percentage,
-                        _format_percentage(params.minimum_attendance_percentage),
+                    "module '%s': attended %s of %s topics (%.1f%%), below %s%%" % (
+                        completion.module_name, completion.ticked_topics, completion.total_topics,
+                        completion.percentage, _format_percentage(minimum_percentage),
                     )
                 )
-        results[beneficiary_id] = result
     return results
 
 

@@ -36,7 +36,9 @@ class AttendanceGrantStrategy:
 
         beneficiaries = list(cls._beneficiaries(payment_plan, kwargs.get("beneficiaries_queryset")))
         attendance = evaluate_attendance(
-            [beneficiary.id for beneficiary in beneficiaries], payment_plan.benefit_plan, params
+            [beneficiary.id for beneficiary in beneficiaries], payment_plan.benefit_plan,
+            params.minimum_attendance_percentage,
+            params.programme.counts_completed_trainings_only,
         )
         individuals_paid = cls._individuals_with_benefits(payment_plan)
 
@@ -48,7 +50,7 @@ class AttendanceGrantStrategy:
                     "already has a benefit under this payment plan that is not rejected",
                 )
                 continue
-            participant = attendance[beneficiary.id]
+            participant = attendance[str(beneficiary.id)]
             if not participant.eligible:
                 cls._log_excluded(payment_plan, beneficiary, participant.reason)
                 continue
