@@ -18,8 +18,6 @@ GRANT_SOURCES = (GRANT_SOURCE_PAYMENT_PLAN, GRANT_SOURCE_BENEFICIARY_JSON)
 DEFAULT_TRANCHE_PERCENTAGE = Decimal("70")
 DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE = Decimal("80")
 
-INDIVIDUAL_BENEFIT_PLAN = "INDIVIDUAL"
-
 
 def _is_blank(value):
     return value is None or (isinstance(value, str) and not value.strip())
@@ -54,11 +52,6 @@ class GrantParameters:
         Raises AttendanceGrantConfigurationError listing every problem found.
         """
         errors = []
-        if payment_plan.benefit_plan.type != INDIVIDUAL_BENEFIT_PLAN:
-            errors.append(
-                "the benefit plan must be an INDIVIDUAL benefit plan, because "
-                "attendance and payment are per participant"
-            )
         json_ext = payment_plan.json_ext if isinstance(payment_plan.json_ext, dict) else {}
         rule = json_ext.get("calculation_rule")
         rule = rule if isinstance(rule, dict) else {}

@@ -3,18 +3,19 @@ import logging
 from core.models import User
 from invoice.models import Bill
 from invoice.services import BillService
-from payroll.models import BenefitConsumption, BenefitConsumptionStatus
+from payroll.models import BenefitAttachment, BenefitConsumptionStatus
 from payroll.services import BenefitConsumptionService, PayrollService
-from social_protection.models import Beneficiary, BeneficiaryStatus
 
 from calcrule_attendance_grant.approval import plan_approval_shortfall
 from calcrule_attendance_grant.attendance import evaluate_attendance
+from calcrule_attendance_grant.beneficiaries import select_payees
 from calcrule_attendance_grant.converters import (
     BeneficiaryToBillConverter,
     BeneficiaryToBillItemConverter,
     GrantBenefitConverter,
+    GroupToBillConverter,
+    GroupToBillItemConverter,
 )
-from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
 from calcrule_attendance_grant.grants import GRANT_COMPONENT_IN_KIND, GRANT_TYPES, IN_KIND_TYPES, resolve_grant
 from calcrule_attendance_grant.parameters import GRANT_SOURCE_PAYMENT_PLAN, GrantParameters
 
@@ -35,29 +36,37 @@ class AttendanceGrantStrategy:
             calculation.get_payment_cycle_parameters(**kwargs)
         user = User.objects.filter(id=user_id).first()
 
-        beneficiaries = list(cls._beneficiaries(payment_plan, kwargs.get("beneficiaries_queryset")))
+        payees = select_payees(
+            payment_plan,
+            beneficiaries_queryset=kwargs.get("beneficiaries_queryset"),
+            enrollments_queryset=kwargs.get("enrollments_queryset"),
+        )
         attendance = evaluate_attendance(
-            [beneficiary.id for beneficiary in beneficiaries], payment_plan.benefit_plan,
+            [payee.beneficiary.id for payee in payees], payment_plan.benefit_plan,
             params.minimum_attendance_percentage,
             params.programme.counts_completed_trainings_only,
         )
-        individuals_paid = cls._individuals_with_benefits(payment_plan)
+        already_paid = cls._beneficiaries_with_benefits(payment_plan)
 
         paid = 0
-        for beneficiary in beneficiaries:
-            if beneficiary.individual_id in individuals_paid:
+        for payee in payees:
+            beneficiary = payee.beneficiary
+            if str(beneficiary.id) in already_paid:
                 cls._log_excluded(
-                    payment_plan, beneficiary,
+                    payment_plan, payee,
                     "already has a benefit under this payment plan that is not rejected",
                 )
                 continue
+            if payee.reason:
+                cls._log_excluded(payment_plan, payee, payee.reason, level=logging.WARNING)
+                continue
             participant = attendance[str(beneficiary.id)]
             if not participant.eligible:
-                cls._log_excluded(payment_plan, beneficiary, participant.reason)
+                cls._log_excluded(payment_plan, payee, participant.reason)
                 continue
             shortfall = plan_approval_shortfall(beneficiary.json_ext)
             if shortfall:
-                cls._log_excluded(payment_plan, beneficiary, shortfall)
+                cls._log_excluded(payment_plan, payee, shortfall)
                 continue
             grant = resolve_grant(
                 beneficiary.json_ext,
@@ -67,19 +76,19 @@ class AttendanceGrantStrategy:
                 tranche_percentage=params.tranche_percentage,
             )
             if grant.reason:
-                cls._log_excluded(payment_plan, beneficiary, grant.reason, level=logging.WARNING)
+                cls._log_excluded(payment_plan, payee, grant.reason, level=logging.WARNING)
                 continue
             amount = grant.part(params.grant_component)
             if not amount:
                 cls._log_excluded(
-                    payment_plan, beneficiary,
+                    payment_plan, payee,
                     "its tranche has no %s part" % params.grant_component.replace("_", "-"),
                 )
                 continue
 
             calculation.run_convert(
                 payment_plan,
-                beneficiary=beneficiary,
+                payee=payee,
                 amount=amount,
                 benefit_type="+".join(grant.part_types(params.grant_component)),
                 json_ext=cls._benefit_json_ext(params, grant),
@@ -88,12 +97,12 @@ class AttendanceGrantStrategy:
                 payment_cycle=payment_cycle,
                 payroll=payroll,
             )
-            individuals_paid.add(beneficiary.individual_id)
+            already_paid.add(str(beneficiary.id))
             paid += 1
 
         logger.info(
             "Attendance grant, payment plan %s: %s of %s participant(s) paid.",
-            payment_plan.code, paid, len(beneficiaries),
+            payment_plan.code, paid, len(payees),
         )
         return "Calculation and transformation into bills completed successfully."
 
@@ -131,63 +140,55 @@ class AttendanceGrantStrategy:
         }
 
     @staticmethod
-    def _beneficiaries(payment_plan, beneficiaries_queryset):
-        """ACTIVE beneficiaries of the plan, narrowed to the payroll's selection."""
-        beneficiaries = Beneficiary.objects.filter(
-            benefit_plan=payment_plan.benefit_plan,
-            status=BeneficiaryStatus.ACTIVE,
-            is_deleted=False,
-        )
-        if beneficiaries_queryset is not None:
-            if getattr(beneficiaries_queryset, "model", None) is not Beneficiary:
-                raise AttendanceGrantConfigurationError(
-                    "The attendance-grant rule expects a Beneficiary selection, got %s."
-                    % getattr(beneficiaries_queryset, "model", type(beneficiaries_queryset)).__name__
-                )
-            beneficiaries = beneficiaries.filter(id__in=beneficiaries_queryset.values("id"))
-        return beneficiaries.select_related("individual").order_by("date_created", "id")
-
-    @staticmethod
-    def _individuals_with_benefits(payment_plan):
-        """Individuals with a benefit under this plan that was not rejected."""
+    def _beneficiaries_with_benefits(payment_plan):
+        """IDs of the beneficiaries (Bill subjects) with a benefit under this plan
+        that was not rejected."""
         return set(
-            BenefitConsumption.objects.filter(
+            BenefitAttachment.objects.filter(
                 is_deleted=False,
-                payrollbenefitconsumption__is_deleted=False,
-                payrollbenefitconsumption__payroll__is_deleted=False,
-                payrollbenefitconsumption__payroll__payment_plan=payment_plan,
+                benefit__is_deleted=False,
+                benefit__payrollbenefitconsumption__is_deleted=False,
+                benefit__payrollbenefitconsumption__payroll__is_deleted=False,
+                benefit__payrollbenefitconsumption__payroll__payment_plan=payment_plan,
             ).exclude(
-                status=BenefitConsumptionStatus.REJECTED,
-            ).values_list("individual_id", flat=True)
+                benefit__status=BenefitConsumptionStatus.REJECTED,
+            ).values_list("bill__subject_id", flat=True)
         )
 
     @staticmethod
-    def _log_excluded(payment_plan, beneficiary, reason, level=logging.INFO):
+    def _log_excluded(payment_plan, payee, reason, level=logging.INFO):
         logger.log(
-            level,
-            "Attendance grant, payment plan %s: beneficiary %s (individual %s) not paid: %s.",
-            payment_plan.code, beneficiary.id, beneficiary.individual_id, reason,
+            level, "Attendance grant, payment plan %s: %s not paid: %s.",
+            payment_plan.code, payee.label, reason,
         )
 
     @classmethod
     def convert(cls, payment_plan, **kwargs):
-        beneficiary = kwargs["beneficiary"]
+        payee = kwargs["payee"]
+        beneficiary = payee.beneficiary
         amount = kwargs["amount"]
         payment_cycle = kwargs.get("payment_cycle")
         user = kwargs.get("user")
         payroll = kwargs.get("payroll")
+        # The Bill's subject is the beneficiary, the household for a GROUP programme,
+        # which PayrollService uses to find each household's benefit.
+        if payee.is_household:
+            bill_converter, item_converter = GroupToBillConverter, GroupToBillItemConverter
+            type_conversion = "group - bill"
+        else:
+            bill_converter, item_converter = BeneficiaryToBillConverter, BeneficiaryToBillItemConverter
+            type_conversion = "beneficiary - bill"
         convert_results = {
-            "bill_data": BeneficiaryToBillConverter.to_bill_obj(
+            "bill_data": bill_converter.to_bill_obj(
                 payment_plan, beneficiary, amount, kwargs.get("end_date"), payment_cycle
             ),
-            "bill_data_line": [
-                BeneficiaryToBillItemConverter.to_bill_item_obj(payment_plan, beneficiary, amount)
-            ],
-            "type_conversion": "beneficiary - bill",
+            "bill_data_line": [item_converter.to_bill_item_obj(payment_plan, beneficiary, amount)],
+            "type_conversion": type_conversion,
             "user": user,
         }
+        # The benefit is paid to the participant: the household's primary worker.
         benefit_data = GrantBenefitConverter.to_grant_benefit_obj(
-            beneficiary, amount, payment_plan, payment_cycle,
+            payee.participant, amount, payment_plan, payment_cycle,
             kwargs["benefit_type"], kwargs["json_ext"],
         )
         cls._save(convert_results, benefit_data, amount, payroll, user, beneficiary)

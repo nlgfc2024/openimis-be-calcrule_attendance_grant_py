@@ -8,7 +8,7 @@ from project_social_protection.models import BeneficiaryProjectTimeEntry, Projec
 from calcrule_attendance_grant.attendance import evaluate_attendance
 from calcrule_attendance_grant.tests.helpers import (
     attend,
-    create_individual_benefit_plan,
+    create_programme,
     create_module,
     create_participant,
     create_training,
@@ -21,7 +21,7 @@ class EvaluateAttendanceTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.user = LogInHelper().get_or_create_user_api()
-        cls.benefit_plan = create_individual_benefit_plan(cls.user, 'AGATT')
+        cls.benefit_plan = create_programme(cls.user, 'AGATT')
         cls.module_a = create_module(cls.user, cls.benefit_plan, "Attendance module A", 5, "AGA")
         cls.module_b = create_module(cls.user, cls.benefit_plan, "Attendance module B", 10, "AGB")
         cls.training = create_training(cls.user, cls.benefit_plan, [cls.module_a, cls.module_b], 'Training 1')
@@ -94,7 +94,7 @@ class EvaluateAttendanceTest(TestCase):
             self.user, self.benefit_plan, [self.module_a, self.module_b], 'Work project',
             project_type='WORK',
         )
-        other_plan = create_individual_benefit_plan(self.user, 'AGOTHER')
+        other_plan = create_programme(self.user, 'AGOTHER')
         other_training = create_training(self.user, other_plan, [self.module_a, self.module_b], 'Other')
         attend(self.user, beneficiary, work, 15)
         attend(self.user, beneficiary, other_training, 15)

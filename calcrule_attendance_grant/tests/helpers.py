@@ -1,14 +1,22 @@
 """Fixtures shared by the attendance-grant tests."""
 from decimal import Decimal
 
-from social_protection.models import Beneficiary, BeneficiaryStatus
+from individual.models import GroupIndividual
+from social_protection.models import Beneficiary, BeneficiaryStatus, GroupBeneficiary
 from social_protection.services import BeneficiaryService
-from social_protection.tests.test_helpers import create_benefit_plan, create_individual
+from social_protection.tests.test_helpers import (
+    add_individual_to_group,
+    create_benefit_plan,
+    create_group,
+    create_individual,
+)
 from project_social_protection.models import (
     Activity,
     ActivityTopic,
     BeneficiaryProjectEnrollment,
     BeneficiaryProjectTimeEntry,
+    GroupBeneficiaryProjectEnrollment,
+    GroupBeneficiaryProjectTimeEntry,
     ProjectStatus,
     ProjectTopic,
 )
@@ -19,14 +27,41 @@ from calcrule_attendance_grant.parameters import GrantParameters
 from calcrule_attendance_grant.programme import ProgrammeSettings
 
 
-def create_individual_benefit_plan(user, code, json_ext=None):
+def create_programme(user, code, json_ext=None, plan_type='INDIVIDUAL'):
     return create_benefit_plan(
         user.username,
         payload_override={
-            'code': code, 'type': 'INDIVIDUAL', 'max_beneficiaries': None,
+            'code': code, 'type': plan_type, 'max_beneficiaries': None,
             'json_ext': json_ext or {},
         },
     )
+
+
+def create_household(user, benefit_plan, code, primary_workers=1, json_ext=None):
+    """An ACTIVE household beneficiary with a head and ``primary_workers`` workers.
+
+    Returns the GroupBeneficiary and its members, the head first.
+    """
+    group = create_group(user.username, {'code': code})
+    members = []
+    for position in range(max(primary_workers, 1) + 1):
+        individual = create_individual(user.username, payload_override={'first_name': f'{code}-{position}'})
+        member = add_individual_to_group(user.username, individual, group, is_head=position == 0)
+        if 0 < position <= primary_workers:
+            GroupIndividual.objects.filter(id=member.id).update(json_ext={"primary_worker": True})
+        members.append(member)
+    household = GroupBeneficiary(
+        group=group, benefit_plan=benefit_plan, status=BeneficiaryStatus.ACTIVE, json_ext=json_ext or {},
+    )
+    household.save(user=user)
+    return household, members
+
+
+def attend_household(user, household, training, topics):
+    """Enroll the household and tick ``topics`` for its primary worker."""
+    enrollment = GroupBeneficiaryProjectEnrollment(group_beneficiary=household, project=training)
+    enrollment.save(user=user)
+    return tick(user, enrollment, topics, time_entry_model=GroupBeneficiaryProjectTimeEntry)
 
 
 def create_participant(user, benefit_plan, first_name, json_ext=None):

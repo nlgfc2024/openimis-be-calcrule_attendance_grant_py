@@ -23,7 +23,7 @@ from calcrule_attendance_grant.calculation_rule import AttendanceGrantCalculatio
 from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
 from calcrule_attendance_grant.tests.helpers import (
     attend,
-    create_individual_benefit_plan,
+    create_programme,
     create_module,
     create_participant,
     create_training,
@@ -52,10 +52,10 @@ class AttendanceGrantRunMixin:
     """Payroll plumbing shared by the rule tests. Each module has 5 topics."""
 
     @classmethod
-    def set_up_programme(cls, code, allowed_grant_types):
+    def set_up_programme(cls, code, allowed_grant_types, plan_type='INDIVIDUAL'):
         cls.user = LogInHelper().get_or_create_user_api()
-        cls.benefit_plan = create_individual_benefit_plan(
-            cls.user, code, json_ext={"allowed_grant_types": allowed_grant_types})
+        cls.benefit_plan = create_programme(
+            cls.user, code, json_ext={"allowed_grant_types": allowed_grant_types}, plan_type=plan_type)
         cls.module_1 = create_module(cls.user, cls.benefit_plan, f"{code} module 1", 5, f"{code}1")
         cls.module_2 = create_module(cls.user, cls.benefit_plan, f"{code} module 2", 5, f"{code}2")
         cls.training = create_training(cls.user, cls.benefit_plan, [cls.module_1, cls.module_2], code)

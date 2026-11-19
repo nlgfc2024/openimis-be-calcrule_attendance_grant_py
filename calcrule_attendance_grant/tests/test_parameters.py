@@ -121,11 +121,11 @@ class GrantParametersTest(SimpleTestCase):
                         rule=self.rule(**{name: value}),
                     )
 
-    def test_rejects_group_benefit_plans(self):
-        self.assert_configuration_error(
-            "the benefit plan must be an INDIVIDUAL benefit plan",
-            benefit_plan_type="GROUP",
-        )
+    def test_accepts_group_and_individual_programmes(self):
+        for benefit_plan_type in ("GROUP", "INDIVIDUAL"):
+            with self.subTest(benefit_plan_type=benefit_plan_type):
+                plan = payment_plan_stub(self.rule(), benefit_plan_type=benefit_plan_type)
+                self.assertEqual(GrantParameters.from_payment_plan(plan).grant_component, "cash")
 
     def test_rejects_second_tranche_plans_until_supported(self):
         self.assert_configuration_error(
