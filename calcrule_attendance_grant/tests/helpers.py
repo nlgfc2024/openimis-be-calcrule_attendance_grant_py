@@ -107,10 +107,7 @@ def create_training(user, benefit_plan, modules, name, status=ProjectStatus.COMP
         project_type=project_type, allows_multiple_enrollments=True,
     )
     for sequence, topic in enumerate(topics, start=1):
-        ProjectTopic(
-            project=training, topic=topic, module=topic.activity, sequence=sequence,
-            code=topic.code, name=topic.name, module_name=topic.activity.name,
-        ).save(username=user.username)
+        ProjectTopic(project=training, topic=topic, sequence=sequence).save(username=user.username)
     return training
 
 
