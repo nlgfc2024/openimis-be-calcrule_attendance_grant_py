@@ -252,6 +252,18 @@ class GrantUtilizationUpload:
                 continue
             share = (Decimal(str(amount)) * percentage / 100).quantize(CENT, rounding=ROUND_HALF_UP)
             total = sum((Decimal(str(merged.get(key) or 0)) for key in keys), Decimal("0")).quantize(CENT)
+            cash_key = tranche_amount_key(tranche, CASH)
+            if CASH in types and merged.get(cash_key) is None:
+                # The payroll pays the rest of the plan's share in cash.
+                if total > share:
+                    warnings.append({
+                        "field_name": keys[1],
+                        "note": "tranche-%s equipment and service add up to %s, more than the default %s%% share "
+                                "of %s (%s); the payroll checks the payment plan's percentage"
+                                % ("one" if tranche == 1 else "two", total, f"{percentage.normalize():f}", amount,
+                                   share),
+                    })
+                continue
             if total != share:
                 warnings.append({
                     "field_name": keys[0],

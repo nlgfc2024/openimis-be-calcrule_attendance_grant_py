@@ -156,6 +156,18 @@ class GrantUtilizationUploadTest(TestCase):
         self.other.refresh_from_db()
         self.assertEqual(self.other.json_ext["tranche_1_cash_amount"], 600)
 
+    def test_without_a_cash_amount_only_in_kind_above_the_share_is_a_warning(self):
+        upload, _ = self.upload(
+            {"ID": str(self.beneficiary.id), "grant_types": "CASH;EQUIPMENT", "approved_grant_amount": 1000,
+             "tranche_1_equipment_amount": 500},
+            {"ID": str(self.other.id), "grant_types": "CASH;EQUIPMENT", "tranche_1_equipment_amount": 800},
+        )
+        fine = IndividualDataSource.objects.get(upload=upload, json_ext__ID=str(self.beneficiary.id))
+        self.assertEqual(fine.validations.get("validation_warnings"), [])
+        over = IndividualDataSource.objects.get(upload=upload, json_ext__ID=str(self.other.id))
+        self.assertIn("equipment and service add up to 800.00, more than the default 70% share of 900 (630.00)",
+                      over.validations["validation_warnings"][0]["note"])
+
     def test_spreadsheet_dates_are_stored_as_iso_dates(self):
         self.upload({"ID": str(self.beneficiary.id), "plan_approved_on": 1790812800000})
         self.beneficiary.refresh_from_db()
