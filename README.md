@@ -113,6 +113,79 @@ reconciliation file: the in-kind amounts for the PIU team on an `in_kind` plan.
   `module 'Business skills': attended 3 of 5 topics (60.0%), below 80%`. Nobody is
   paid zero.
 
+## Protected beneficiary fields
+
+The keys that size and release the grant payments sit on the beneficiary's
+`json_ext` (`GroupBeneficiary` for UPG and RMEP, `Beneficiary` for UMEP). The
+beneficiary forms render every `json_ext` key as an editable field, so the module
+restricts them to roles holding the matching right:
+
+| Right | Code | Protected keys |
+|---|---|---|
+| Manage beneficiary plans and grants | `210001` | `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference`, `business_plan_status`, `plan_approved_on`, `plan_approved_by` |
+| Record utilization assessments | `210002` | `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` |
+
+Before-hooks on `beneficiary_service.create` / `update` and
+`group_beneficiary_service.create` / `update` reject setting, changing or removing
+a protected key by a user without its right. Unchanged values pass, so other fields
+can still be saved. An `APPROVED` `business_plan_status` needs `plan_approved_on`
+and `plan_approved_by`, and a utilization result needs `utilization_assessed_on`
+and `utilization_assessed_by`. IMIS administrators hold every right.
+
+With maker-checker, the maker needs the right to create the update task
+(`task_service.create`), and each approver needs it to approve the task
+(`task_service.resolve_task`), so an approval they may not give fails with a clear
+error. The approved task then runs as the approver and is checked again. Rejecting
+a task needs no right.
+
+The generic "Python Beneficiaries Update" upload writes `json_ext` in SQL, so these
+hooks do not see it; do not use it for protected columns.
+
+**Deployment:** assign `210001` to the roles that enter grant amounts and approve
+plans, and `210002` to the roles that record utilization assessments.
+
+## Grant and utilization upload
+
+The module registers the upload workflow "Python Beneficiary Grant and Utilization
+Update" in the `socialProtection` group, so it appears in the programme's existing
+beneficiary upload dialog for GROUP and INDIVIDUAL programmes alike.
+
+- The file needs an `ID` column: the GroupBeneficiary ID for UPG and RMEP, the
+  Beneficiary ID for UMEP. Every other column must be one of the protected keys
+  above; any other column fails the whole upload.
+- Plan and grant columns need right `210001`, and utilization columns need `210002`,
+  or the whole upload is refused.
+- Each row is validated: the beneficiary belongs to the programme;
+  `approved_grant_amount` is positive and per-tranche amounts are 0 or more, with at
+  most two decimals; statuses are `PENDING`, `APPROVED` or `REJECTED`, and
+  `utilization_confirmed` is `YES` or `NO`; `utilization_percentage` is from 0 to
+  100; dates are `YYYY-MM-DD` (spreadsheet dates are converted).
+- `grant_types` is a semicolon-separated list such as `CASH;EQUIPMENT`, limited to
+  the programme's `allowed_grant_types` and stored as a JSON list. A per-tranche
+  amount can be non-zero only for a recorded grant type, and a grant without cash
+  has no tranche-two amounts.
+- When a tranche's amounts do not add up to the default 70% or 30% share of
+  `approved_grant_amount` (100% for a grant without cash), the row gets a warning
+  but is applied; the payroll checks the exact share against the payment plan.
+- Only the submitted keys are merged into the beneficiary's `json_ext`, as numbers
+  where they are numbers. A blank cell is not submitted, so an upload never clears a
+  value; correct one through the beneficiary form instead.
+- Valid rows are saved through the beneficiary services, so the rights above,
+  history and maker-checker apply. Invalid rows are listed with their errors in the
+  existing invalid-items download, and the upload ends as `SUCCESS`,
+  `PARTIAL_SUCCESS`, `FAIL` or, when rows became approval tasks,
+  `WAITING_FOR_VERIFICATION`.
+- For UMEP, with `enable_maker_checker_for_beneficiary_update` on, each row becomes
+  a beneficiary update task. Household beneficiaries have no update task, so UPG
+  and RMEP rows apply directly.
+
+**Deployment:** declare the keys each programme uses in its BenefitPlan
+`beneficiary_data_schema`: RMEP and UMEP all plan, grant, cash and equipment tranche
+and utilization keys, UMEP also the service tranche keys, and UPG only the
+plan-approval and utilization keys. Set `allowed_grant_types` to `["CASH"]` for UPG,
+`["CASH", "EQUIPMENT"]` for RMEP and all three for UMEP. Do not use "Python
+Beneficiaries Update" for these columns: it bypasses the rights.
+
 ## Settings
 
 PaymentPlan parameters, stored under `PaymentPlan.json_ext.calculation_rule`. Values
@@ -134,3 +207,10 @@ Programme settings, on `BenefitPlan.json_ext`:
 |---|---|
 | `allowed_grant_types` | Required. `["CASH"]` for UPG, `["CASH", "EQUIPMENT"]` for RMEP, all three for UMEP. |
 | `training_disqualification_percentage` | Set for UMEP (90): only COMPLETED trainings count. |
+
+Module settings (`ModuleConfiguration` for `calcrule_attendance_grant`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `gql_plans_and_grants_perms` | `["210001"]` | Right to change the plan and grant keys. |
+| `gql_utilization_assessment_perms` | `["210002"]` | Right to change the utilization keys. |
