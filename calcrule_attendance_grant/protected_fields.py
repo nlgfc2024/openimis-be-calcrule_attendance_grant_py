@@ -25,6 +25,7 @@ PLAN_AND_GRANT_KEYS = (
     "business_plan_status",
     "plan_approved_on",
     "plan_approved_by",
+    "plan_rejection_reason",
 )
 UTILIZATION_KEYS = (
     "utilization_percentage",
@@ -34,6 +35,7 @@ UTILIZATION_KEYS = (
     "utilization_notes",
 )
 APPROVED = "APPROVED"
+REJECTED = "REJECTED"
 
 
 def as_json_ext(value):
@@ -66,6 +68,8 @@ def check_protected_changes(user, current_json_ext, incoming_json_ext):
             missing = [key for key in ("plan_approved_on", "plan_approved_by") if _value(incoming, key) is None]
             if missing:
                 errors.append(_("An APPROVED plan needs %s.") % " and ".join(missing))
+        if _value(incoming, "business_plan_status") == REJECTED and _value(incoming, "plan_rejection_reason") is None:
+            errors.append(_("A REJECTED plan needs plan_rejection_reason."))
 
     utilization_changes = changed_keys(current, incoming, UTILIZATION_KEYS)
     if utilization_changes:

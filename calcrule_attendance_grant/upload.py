@@ -35,7 +35,8 @@ WORKFLOW_GROUP = "socialProtection"
 ID_COLUMN = "ID"
 
 AMOUNT_KEYS = tuple(key for key in PLAN_AND_GRANT_KEYS if key.endswith("_amount"))
-TEXT_KEYS = ("business_plan_reference", "plan_approved_by", "utilization_assessed_by", "utilization_notes")
+TEXT_KEYS = ("business_plan_reference", "plan_approved_by", "plan_rejection_reason", "utilization_assessed_by",
+             "utilization_notes")
 DATE_KEYS = ("plan_approved_on", "utilization_assessed_on")
 PLAN_STATUSES = ("PENDING", "APPROVED", "REJECTED")
 YES_NO = ("YES", "NO")

@@ -127,6 +127,17 @@ class GrantUtilizationUploadTest(TestCase):
         self.assertEqual(errors[str(self.beneficiary.id)][0]["note"], "An APPROVED plan needs plan_approved_by.")
         self.assertIn("must be one of YES, NO", errors[str(self.other.id)][0]["note"])
 
+    def test_a_rejected_plan_needs_its_reason(self):
+        upload, _ = self.upload(
+            {"ID": str(self.beneficiary.id), "business_plan_status": "REJECTED"},
+            {"ID": str(self.other.id), "business_plan_status": "REJECTED", "plan_rejection_reason": " Not viable "},
+        )
+        errors = self.errors(upload)
+        self.assertEqual(errors[str(self.beneficiary.id)][0]["note"], "A REJECTED plan needs plan_rejection_reason.")
+        self.assertEqual(errors[str(self.other.id)], [])
+        self.other.refresh_from_db()
+        self.assertEqual(self.other.json_ext["plan_rejection_reason"], "Not viable")
+
     def test_tranche_amounts_follow_the_grant_types(self):
         upload, _ = self.upload(
             {"ID": str(self.beneficiary.id), "grant_types": "EQUIPMENT", "approved_grant_amount": 800,

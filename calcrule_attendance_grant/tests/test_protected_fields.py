@@ -77,6 +77,15 @@ class ProtectedFieldsTest(TestCase):
         with self.assertRaisesMessage(ValidationError, "A utilization result needs utilization_assessed_by."):
             self.update(self.assessor, {**APPROVED_PLAN, **ASSESSMENT, "utilization_assessed_by": " "})
 
+    def test_a_rejected_plan_needs_a_reason(self):
+        rejected = {**APPROVED_PLAN, "business_plan_status": "REJECTED"}
+        with self.assertRaisesMessage(ValidationError, "A REJECTED plan needs plan_rejection_reason."):
+            self.update(self.planner, rejected)
+        with self.assertRaisesMessage(ValidationError, "can change: plan_rejection_reason"):
+            self.update(self.clerk, {**APPROVED_PLAN, "plan_rejection_reason": "Not viable"})
+        result = self.update(self.planner, {**rejected, "plan_rejection_reason": "Not viable"})
+        self.assertTrue(result["success"], result)
+
     def test_creating_a_beneficiary_with_protected_keys_needs_the_right(self):
         individual = create_individual(self.clerk.username, {'first_name': 'NewProtected'})
         data = {"individual_id": individual.id, "benefit_plan_id": self.benefit_plan.id,
