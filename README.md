@@ -122,14 +122,14 @@ restricts them to roles holding the matching right:
 
 | Right | Code | Protected keys |
 |---|---|---|
-| Manage beneficiary plans and grants | `210001` | `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference`, `business_plan_status`, `plan_approved_on`, `plan_approved_by` |
+| Manage beneficiary plans and grants | `210001` | `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference`, `business_plan_status`, `plan_approved_on`, `plan_approved_by`, `plan_rejection_reason` |
 | Record utilization assessments | `210002` | `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` |
 
 Before-hooks on `beneficiary_service.create` / `update` and
 `group_beneficiary_service.create` / `update` reject setting, changing or removing
 a protected key by a user without its right. Unchanged values pass, so other fields
 can still be saved. An `APPROVED` `business_plan_status` needs `plan_approved_on`
-and `plan_approved_by`, and a utilization result needs `utilization_assessed_on`
+and `plan_approved_by`, a `REJECTED` one needs `plan_rejection_reason`, and a utilization result needs `utilization_assessed_on`
 and `utilization_assessed_by`. IMIS administrators hold every right.
 
 With maker-checker, the maker needs the right to create the update task
