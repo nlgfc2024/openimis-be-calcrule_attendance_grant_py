@@ -1,18 +1,18 @@
 """Who the rule evaluates and who is paid.
 
 UPG and RMEP are GROUP programmes. Their beneficiary is the household
-(GroupBeneficiary), and its participant is the primary worker: the one member whose
-``GroupIndividual.json_ext`` marks them as such. PayrollService passes the
+(GroupBeneficiary), and its participant is the primary worker of the verified
+household, as resolved by ``individual.primary_recipients`` for enrolment, KYC and
+payments alike. PayrollService passes the
 households' project enrollments, so a household with several enrollments is taken
 once. UMEP is an INDIVIDUAL programme: its beneficiary is a Beneficiary and the
 participant is that Individual.
 """
 from dataclasses import dataclass
 
-from individual.models import GroupIndividual
+from individual.primary_recipients import authoritative_primary_worker_memberships
 from social_protection.models import Beneficiary, BeneficiaryStatus, GroupBeneficiary
 
-from calcrule_attendance_grant.apps import CalcruleAttendanceGrantConfig
 from calcrule_attendance_grant.attendance import GROUP_BENEFIT_PLAN
 from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
 
@@ -71,11 +71,9 @@ def _select(model, benefit_plan, beneficiaries_queryset, enrollments_queryset, e
 
 
 def _household_payees(households):
-    key = "json_ext__%s" % CalcruleAttendanceGrantConfig.primary_worker_json_ext_key
     workers = {}
-    for member in GroupIndividual.objects.filter(
+    for member in authoritative_primary_worker_memberships().filter(
             group_id__in=[household.group_id for household in households],
-            is_deleted=False, individual__is_deleted=False, **{key: True},
     ).select_related("individual").order_by("date_created", "id"):
         workers.setdefault(member.group_id, []).append(member)
 
@@ -86,7 +84,7 @@ def _household_payees(households):
             payees.append(Payee(beneficiary=household, participant=members[0]))
         else:
             payees.append(Payee(beneficiary=household, reason=(
-                "the household has no primary worker" if not members
+                "the household has no primary worker or is not verified" if not members
                 else "the household has %s primary workers" % len(members)
             )))
     return payees

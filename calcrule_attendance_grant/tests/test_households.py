@@ -75,9 +75,19 @@ class HouseholdGrantTest(AttendanceGrantRunMixin, TestCase):
         self.assertEqual(self.benefits(payroll).count(), 1)
         output = "\n".join(logs.output)
         self.assertIn(f"household beneficiary {nobody.id} (primary worker None) not paid: "
-                      "the household has no primary worker", output)
+                      "the household has no primary worker or is not verified", output)
         self.assertIn(f"household beneficiary {two.id} (primary worker None) not paid: "
                       "the household has 2 primary workers", output)
+
+    def test_an_unverified_household_is_excluded(self):
+        unverified, _ = create_household(self.user, self.benefit_plan, 'AGHH-UNVERIFIED',
+                                         json_ext=RMEP_GRANT, verified=False)
+        attend_household(self.user, unverified, self.training, 10)
+        with self.assertLogs(STRATEGY_LOGGER, level="WARNING") as logs:
+            payroll = self.run_payroll(self.payment_plan(), enrollments_queryset=self.household_enrollments())
+        self.assertEqual(self.benefits(payroll).get().individual_id, self.primary_worker.individual_id)
+        self.assertIn(f"household beneficiary {unverified.id} (primary worker None) not paid: "
+                      "the household has no primary worker or is not verified", "\n".join(logs.output))
 
     def test_household_attendance_is_its_primary_workers_attendance(self):
         short, _ = create_household(self.user, self.benefit_plan, 'AGHH-SHORT', json_ext=RMEP_GRANT)

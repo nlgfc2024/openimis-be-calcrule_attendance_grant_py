@@ -1,7 +1,7 @@
 """Fixtures shared by the attendance-grant tests."""
 from decimal import Decimal
 
-from individual.models import GroupIndividual
+from individual.models import Group, GroupIndividual
 from social_protection.models import Beneficiary, BeneficiaryStatus, GroupBeneficiary
 from social_protection.services import BeneficiaryService
 from social_protection.tests.test_helpers import (
@@ -37,8 +37,10 @@ def create_programme(user, code, json_ext=None, plan_type='INDIVIDUAL'):
     )
 
 
-def create_household(user, benefit_plan, code, primary_workers=1, json_ext=None):
+def create_household(user, benefit_plan, code, primary_workers=1, json_ext=None, verified=True):
     """An ACTIVE household beneficiary with a head and ``primary_workers`` workers.
+
+    The registry keys are enrolment's defaults, which individual.primary_recipients reads.
 
     Returns the GroupBeneficiary and its members, the head first.
     """
@@ -50,6 +52,9 @@ def create_household(user, benefit_plan, code, primary_workers=1, json_ext=None)
         if 0 < position <= primary_workers:
             GroupIndividual.objects.filter(id=member.id).update(json_ext={"primary_worker": True})
         members.append(member)
+    # Set after the members: saving a member rewrites the household's json_ext.
+    Group.objects.filter(id=group.id).update(
+        json_ext={"validation_status": "VERIFIED" if verified else "PENDING"})
     household = GroupBeneficiary(
         group=group, benefit_plan=benefit_plan, status=BeneficiaryStatus.ACTIVE, json_ext=json_ext or {},
     )

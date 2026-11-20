@@ -16,7 +16,8 @@ calcrule_attendance_grant
 
 - `openimis-be-core`, `openimis-be-calculation`, `openimis-be-contribution_plan`
 - `openimis-be-invoice`, `openimis-be-payroll`
-- `openimis-be-individual`, `openimis-be-social_protection`
+- `openimis-be-individual`, with `individual.primary_recipients` (the shared
+  resolver of a verified household's primary worker), and `openimis-be-social_protection`
 - `openimis-be-project_social_protection`, with training support: `Project.project_type`
   (trainings are projects of type `TRAINING`), training topic sheets (`ProjectTopic`)
   and the per-module completion helper `training_topics.training_module_completion`
@@ -29,10 +30,10 @@ calcrule_attendance_grant
 | UPG, RMEP | GROUP | The household (`GroupBeneficiary`) | Its primary worker |
 | UMEP | INDIVIDUAL | The `Beneficiary` | Its individual |
 
-A household's primary worker is the one member whose `GroupIndividual.json_ext`
-key `primary_worker` is true (the key is the module setting
-`primary_worker_json_ext_key`). A household without exactly one primary worker is
-excluded and logged. The household is the Bill subject; the benefit is made out to
+A household's primary worker comes from `individual.primary_recipients`, the
+resolver enrolment, KYC and payments share: a member marked as primary worker in a
+VERIFIED household. A household without exactly one such member is excluded and
+logged. The household is the Bill subject; the benefit is made out to
 the primary worker. For GROUP plans, PayrollService then makes each household
 benefit payable to the member its payroll settings name.
 
@@ -133,5 +134,3 @@ Programme settings, on `BenefitPlan.json_ext`:
 |---|---|
 | `allowed_grant_types` | Required. `["CASH"]` for UPG, `["CASH", "EQUIPMENT"]` for RMEP, all three for UMEP. |
 | `training_disqualification_percentage` | Set for UMEP (90): only COMPLETED trainings count. |
-
-Module setting: `primary_worker_json_ext_key`, default `primary_worker`.
