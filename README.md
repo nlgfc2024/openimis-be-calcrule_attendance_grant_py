@@ -75,9 +75,14 @@ records none. The grant amount A is:
 | UMEP | `beneficiary_json` | The beneficiary's programme contribution, `json_ext.approved_grant_amount`. |
 
 The tranche share S is `A x tranche_percentage` when the grant includes `CASH`, and
-`A x 100%` otherwise. The beneficiary records how S splits into
-`tranche_1_cash_amount`, `tranche_1_equipment_amount` and `tranche_1_service_amount`;
-they must use only the grant types and add up to S. A cash-only grant needs no split.
+`A x 100%` otherwise. The beneficiary records the in-kind amounts the tranche
+delivers, `tranche_1_equipment_amount` and `tranche_1_service_amount`, for its grant
+types. The cash part is the rest of S, so a different `tranche_percentage` on the
+PaymentPlan changes only the cash; in-kind amounts above S exclude the beneficiary.
+A recorded `tranche_<n>_cash_amount` is used as given, and then the amounts must add
+up to S. A cash-only grant records nothing, and tranche two is S in cash unless it
+records in-kind amounts. A grant without cash has no cash part, so its in-kind
+amounts must add up to A.
 A `cash` plan pays the cash amount, and an `in_kind` plan pays the equipment and
 service amounts, so a beneficiary with both is in both payrolls and the two add up
 to S. Amounts must be JSON numbers; text, missing or inconsistent amounts exclude
@@ -165,8 +170,9 @@ beneficiary upload dialog for GROUP and INDIVIDUAL programmes alike.
   amount can be non-zero only for a recorded grant type, and a grant without cash
   has no tranche-two amounts.
 - When a tranche's amounts do not add up to the default 70% or 30% share of
-  `approved_grant_amount` (100% for a grant without cash), the row gets a warning
-  but is applied; the payroll checks the exact share against the payment plan.
+  `approved_grant_amount` (100% for a grant without cash), or, without a cash
+  amount, its equipment and service exceed that share, the row gets a warning but
+  is applied; the payroll checks the exact share against the payment plan.
 - Only the submitted keys are merged into the beneficiary's `json_ext`, as numbers
   where they are numbers. A blank cell is not submitted, so an upload never clears a
   value; correct one through the beneficiary form instead.
