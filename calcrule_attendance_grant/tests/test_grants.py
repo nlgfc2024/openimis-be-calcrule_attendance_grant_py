@@ -119,6 +119,17 @@ class TrancheMakeUpTest(SimpleTestCase):
         self.assertEqual(grant.part(GRANT_COMPONENT_CASH), 0)
         self.assertEqual(grant.part_types(GRANT_COMPONENT_IN_KIND), ("EQUIPMENT",))
 
+    def test_cash_is_the_rest_of_the_plan_share_when_not_recorded(self):
+        json_ext = {"grant_types": ["CASH", "EQUIPMENT", "SERVICE"], "approved_grant_amount": 1000,
+                    "tranche_1_equipment_amount": 400, "tranche_1_service_amount": 100}
+        self.assertEqual(resolve(json_ext, allowed=UMEP).amounts, {
+            "CASH": Decimal("200.00"), "EQUIPMENT": Decimal("400.00"), "SERVICE": Decimal("100.00")})
+        # Another tranche percentage on the payment plan changes only the cash part.
+        self.assertEqual(resolve(json_ext, allowed=UMEP, percentage="60").amounts["CASH"], Decimal("100.00"))
+        # Tranche two needs no recorded amounts: it is the plan's share in cash.
+        self.assertEqual(resolve(json_ext, allowed=UMEP, percentage="30", tranche=2).amounts, {
+            "CASH": Decimal("300.00"), "EQUIPMENT": Decimal("0.00"), "SERVICE": Decimal("0.00")})
+
     def test_a_cash_only_grant_needs_no_recorded_split(self):
         grant = resolve({"grant_types": ["CASH"], "approved_grant_amount": 1000})
         self.assertEqual(grant.amounts, {"CASH": Decimal("700.00")})
@@ -126,7 +137,9 @@ class TrancheMakeUpTest(SimpleTestCase):
     def test_make_up_errors_are_reasons(self):
         base = {"grant_types": ["CASH", "EQUIPMENT"], "approved_grant_amount": 1000}
         cases = {
-            "tranche-one amounts are missing (tranche_1_cash_amount, tranche_1_equipment_amount)": {},
+            "tranche-one amounts are missing (tranche_1_equipment_amount)": {},
+            "tranche-one amounts: equipment and service add up to 800.00, more than the share 700.00": {
+                "tranche_1_equipment_amount": 800},
             "tranche-one amounts add up to 650.00, expected 700.00": {
                 "tranche_1_cash_amount": 150, "tranche_1_equipment_amount": 500},
             "tranche_1_cash_amount must be a number, got '700'": {"tranche_1_cash_amount": "700"},

@@ -7,9 +7,11 @@ equivalent value of any equipment or service. A tranche pays the share
     S = A x tranche_percentage   when the grant includes cash
     S = A x 100%                 at tranche one when it does not
 
-and the beneficiary records how S splits into a cash amount and an amount per
-in-kind type (``tranche_<n>_<type>_amount``). Cash and in-kind parts are paid by
-separate PaymentPlans, so each plan pays only its own part of S.
+and the beneficiary records the amount of each in-kind type the tranche delivers
+(``tranche_<n>_<type>_amount``). The cash part is the rest of S, so the tranche
+percentage lives only on the PaymentPlan; a recorded cash amount is used as
+given. Cash and in-kind parts are paid by separate PaymentPlans, so each plan pays
+only its own part of S.
 
 Amounts on the beneficiary must be JSON numbers. Text is refused rather than
 guessed at, so a mistyped amount is reported instead of paid.
@@ -118,13 +120,12 @@ def _tranche_amounts(json_ext, grant_types, share, tranche):
     keys = {grant_type: tranche_amount_key(tranche, grant_type) for grant_type in GRANT_TYPES}
     recorded = {grant_type: key for grant_type, key in keys.items() if json_ext.get(key) is not None}
     label = "tranche-%s amounts" % ("one" if tranche == 1 else "two")
+    in_kind_types = [grant_type for grant_type in grant_types if grant_type != CASH]
 
-    if not recorded:
-        if grant_types == (CASH,):
-            # A cash-only grant needs no split: the whole share is cash.
-            return {CASH: share}, None
-        return {}, "%s are missing (%s)" % (
-            label, ", ".join(keys[grant_type] for grant_type in grant_types))
+    # Tranche one delivers the in-kind part of the grant, so it needs those amounts;
+    # tranche two is normally cash only.
+    if tranche == 1 and in_kind_types and not recorded:
+        return {}, "%s are missing (%s)" % (label, ", ".join(keys[grant_type] for grant_type in in_kind_types))
 
     amounts = {}
     for grant_type, key in recorded.items():
@@ -134,6 +135,13 @@ def _tranche_amounts(json_ext, grant_types, share, tranche):
         if amount and grant_type not in grant_types:
             return {}, "%s is %s but %s is not one of the grant types" % (key, amount, grant_type)
         amounts[grant_type] = to_cents(amount)
+
+    derive_cash = CASH in grant_types and CASH not in recorded
+    if derive_cash:
+        in_kind = sum((amounts.get(grant_type, Decimal("0.00")) for grant_type in in_kind_types), Decimal("0.00"))
+        if in_kind > share:
+            return {}, "%s: equipment and service add up to %s, more than the share %s" % (label, in_kind, share)
+        amounts[CASH] = share - in_kind
     amounts = {grant_type: amounts.get(grant_type, Decimal("0.00")) for grant_type in grant_types}
 
     total = sum(amounts.values(), Decimal("0.00"))
