@@ -35,8 +35,11 @@ class CalcruleAttendanceGrantConfig(AppConfig):
     def ready(self):
         from core.models import ModuleConfiguration
 
+        from calcrule_attendance_grant.upload import register_workflow
+
         self._load_config(ModuleConfiguration.get_or_default(MODULE_NAME, DEFAULT_CFG))
         read_all_calculation_rules()
+        register_workflow()
 
     @classmethod
     def _load_config(cls, cfg):
