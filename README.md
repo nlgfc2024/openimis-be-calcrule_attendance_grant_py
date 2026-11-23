@@ -35,7 +35,10 @@ resolver enrolment, KYC and payments share: a member marked as primary worker in
 VERIFIED household. A household without exactly one such member is excluded and
 logged. The household is the Bill subject; the benefit is made out to
 the primary worker. For GROUP plans, PayrollService then makes each household
-benefit payable to the member its payroll settings name.
+benefit payable to the member its payroll settings name, so the payroll module's
+`group_benefit_payee` must be `PRIMARY_WORKER` (openimis-be-payroll_py, "support
+training payrolls and primary-worker payments"): otherwise a GROUP plan's run stops
+with a configuration error, as the person checked and the person paid would differ.
 
 ## How a payroll run is calculated
 
@@ -55,12 +58,17 @@ beneficiary when all of the following hold:
    result counts. Training status does not matter, except for a programme that sets
    `training_disqualification_percentage` (UMEP): its trainings count only once
    COMPLETED.
-2. **Approved plan.** `business_plan_status` is `APPROVED` and `plan_approved_on` is set
-   on the beneficiary's `json_ext`.
+2. **Approved plan.** `business_plan_status` is `APPROVED`, and `plan_approved_on` and
+   `plan_approved_by_id` are set on the beneficiary's `json_ext`. A plan approval
+   records `plan_approved_by_id`, so a plan marked approved any other way (for
+   example by an upload that writes `json_ext` in SQL) is not paid.
 3. **A valid grant and tranche make-up** (see below), with a non-zero part for this
    plan.
-4. **No earlier payment.** The beneficiary has no BenefitConsumption under the same
-   PaymentPlan, unless it was rejected or deleted.
+4. **No earlier payment.** The beneficiary has no BenefitConsumption, other than a
+   rejected or deleted one, under any attendance-grant PaymentPlan of the programme
+   that pays the same part (`cash` or `in_kind`), so a plan re-created to fix a
+   mistake does not pay again. Runs for one programme take turns: the rule locks the
+   programme until the payroll is saved, so two runs never both pay a person.
 
 ### Grant amount, share and parts
 
@@ -116,12 +124,15 @@ reconciliation file: the in-kind amounts for the PIU team on an `in_kind` plan.
 - **Beneficiary problems exclude only that beneficiary.** Each is logged with the
   beneficiary and participant IDs and the reason, for example
   `module 'Business skills': attended 3 of 5 topics (60.0%), below 80%`. Nobody is
-  paid zero.
+  paid zero. Likely slips that do not stop a payment are logged as warnings, for
+  example an in-kind grant type without its tranche-one amount next to a recorded
+  cash amount.
 
 ## Settings
 
-PaymentPlan parameters, stored under `PaymentPlan.json_ext.calculation_rule`. Values
-may be numbers or text.
+PaymentPlan parameters, entered on the Payment Plan form and stored under
+`PaymentPlan.json_ext.calculation_rule`. Values may be numbers or text; the form's
+empty choice (`null`) counts as not set.
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -129,7 +140,7 @@ may be numbers or text.
 | `grant_amount_source` | required | `payment_plan` or `beneficiary_json`. |
 | `grant_amount` | required for `payment_plan` | Programme-wide grant amount. |
 | `tranche_percentage` | `70` | The tranche's share of A for grants that include cash. |
-| `minimum_attendance_percentage` | `80` | Completion each module needs; UMEP plans set 90. |
+| `minimum_attendance_percentage` | `80`; required, and at least `training_disqualification_percentage`, for a programme that sets it (UMEP: 90) | Completion each module needs. |
 
 Second-tranche plans (`requires_reconciled_payment_plan_ids`) are refused for now.
 
