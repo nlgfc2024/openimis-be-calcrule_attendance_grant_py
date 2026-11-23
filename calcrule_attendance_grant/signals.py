@@ -1,17 +1,23 @@
-"""Before-hooks that keep the protected grant, plan and utilization keys to the
-roles holding the matching right (see protected_fields).
+"""Hooks that protect the grant, plan and utilization keys (see protected_fields)
+and run the plan approval task (see plan_approval).
 
 A change can reach a beneficiary in three ways, and each is checked:
 
 - directly, through the beneficiary or household beneficiary service;
-- as a maker-checker task: the maker is checked when the task is created, and
-  each approver when they approve it, so an approval the approver may not give
-  fails with a clear error instead of being dropped when the task runs;
+- as a generic maker-checker task: the maker is checked when the task is created,
+  and each approver when they approve it, so a change that is not allowed fails with
+  a clear error instead of being dropped when the task runs;
 - when the approved task runs, through the service again, as the approver.
+
+Grant and plan keys only change through a plan approval task. Its decisions are
+checked when they are given, and applied when the task completes or fails.
 """
+import logging
+
 from core.service_signals import ServiceSignalBindType
 from core.signals import bind_service_signal
 
+from calcrule_attendance_grant.plan_approval import BUSINESS_EVENT, apply_decision, check_decision
 from calcrule_attendance_grant.protected_fields import check_protected_changes
 
 SERVICE_SIGNALS = (
@@ -24,6 +30,8 @@ SERVICE_SIGNALS = (
 TASK_SERVICES = ("BeneficiaryService", "GroupBeneficiaryService")
 TASK_OPERATIONS = ("create", "update")
 
+logger = logging.getLogger(__name__)
+
 
 def bind_service_signals():
     for signal_name in SERVICE_SIGNALS:
@@ -31,6 +39,8 @@ def bind_service_signals():
     bind_service_signal("task_service.create", protect_on_task_create, bind_type=ServiceSignalBindType.BEFORE)
     bind_service_signal("task_service.resolve_task", protect_on_task_approval,
                         bind_type=ServiceSignalBindType.BEFORE)
+    bind_service_signal("task_service.complete_task", apply_plan_decision,
+                        bind_type=ServiceSignalBindType.AFTER)
 
 
 def protect_on_save(**kwargs):
@@ -54,11 +64,34 @@ def protect_on_task_approval(**kwargs):
 
     obj_data = _service_data(kwargs)
     statuses = obj_data.get("business_status")
-    if not isinstance(statuses, dict) or TasksManagementConfig.task_user_approved not in statuses.values():
+    if not isinstance(statuses, dict):
         return
-    task = Task.objects.filter(id=obj_data.get("id")).first()
-    if task is not None:
-        _check_task(kwargs["cls_"].user, task.business_event, task.data, task.entity_id)
+    task = Task.objects.select_related("task_group").filter(id=obj_data.get("id")).first()
+    if task is None:
+        return
+    user = kwargs["cls_"].user
+    if task.business_event == BUSINESS_EVENT:
+        check_decision(user, task, statuses, obj_data.get("additional_data"))
+    elif TasksManagementConfig.task_user_approved in statuses.values():
+        _check_task(user, task.business_event, task.data, task.entity_id)
+
+
+def apply_plan_decision(**kwargs):
+    """Save a completed or failed plan approval task's decision on its beneficiary."""
+    from core.models import User
+    from tasks_management.models import Task
+
+    result = kwargs.get("result") or {}
+    data = result.get("data") or {}
+    task_data = data.get("task") or {}
+    if not result.get("success") or task_data.get("business_event") != BUSINESS_EVENT:
+        return
+    try:
+        task = Task.objects.get(id=task_data["id"])
+        apply_decision(task, User.objects.get(id=data["user"]["id"]))
+    except Exception as exc:
+        logger.error("Could not apply the plan approval decision of task %s", task_data.get("id"), exc_info=exc)
+        raise
 
 
 def _check_task(user, business_event, task_data, entity_id):
