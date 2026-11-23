@@ -173,43 +173,54 @@ as its executors.
 
 The module registers the upload workflow "Python Beneficiary Grant and Utilization
 Update" in the `socialProtection` group, so it appears in the programme's existing
-beneficiary upload dialog for GROUP and INDIVIDUAL programmes alike.
+beneficiary upload dialog for GROUP and INDIVIDUAL programmes alike. A file holds
+either grant details or utilization assessments:
 
-- The file needs an `ID` column: the GroupBeneficiary ID for UPG and RMEP, the
-  Beneficiary ID for UMEP. Every other column must be one of the protected keys
-  above; any other column fails the whole upload.
-- Plan and grant columns need right `210001`, and utilization columns need `210002`,
-  or the whole upload is refused.
-- Each row is validated: the beneficiary belongs to the programme;
-  `approved_grant_amount` is positive and per-tranche amounts are 0 or more, with at
-  most two decimals; statuses are `PENDING`, `APPROVED` or `REJECTED`, and
-  `utilization_confirmed` is `YES` or `NO`; `utilization_percentage` is from 0 to
-  100; dates are `YYYY-MM-DD` (spreadsheet dates are converted).
-- `grant_types` is a semicolon-separated list such as `CASH;EQUIPMENT`, limited to
-  the programme's `allowed_grant_types` and stored as a JSON list. A per-tranche
-  amount can be non-zero only for a recorded grant type, and a grant without cash
-  has no tranche-two amounts.
-- When a tranche's amounts do not add up to the default 70% or 30% share of
-  `approved_grant_amount` (100% for a grant without cash), the row gets a warning
-  but is applied; the payroll checks the exact share against the payment plan.
-- Only the submitted keys are merged into the beneficiary's `json_ext`, as numbers
-  where they are numbers. A blank cell is not submitted, so an upload never clears a
-  value; correct one through the beneficiary form instead.
-- Valid rows are saved through the beneficiary services, so the rights above,
-  history and maker-checker apply. Invalid rows are listed with their errors in the
-  existing invalid-items download, and the upload ends as `SUCCESS`,
-  `PARTIAL_SUCCESS`, `FAIL` or, when rows became approval tasks,
-  `WAITING_FOR_VERIFICATION`.
-- For UMEP, with `enable_maker_checker_for_beneficiary_update` on, each row becomes
-  a beneficiary update task. Household beneficiaries have no update task, so UPG
-  and RMEP rows apply directly.
+- **Grant details** (`grant_types`, `approved_grant_amount`, the per-tranche amounts,
+  `business_plan_reference`) go for approval. The file's valid rows become one plan
+  approval task (business event `calcrule_attendance_grant.plan_approval_upload`,
+  task source `calcrule_attendance_grant.plan_approval`), and the upload waits as
+  `WAITING_FOR_VERIFICATION`. Nothing is saved until it is decided, as in
+  [Plan approval](#plan-approval): approval saves every row with `APPROVED` and the
+  approver, and the upload ends as `SUCCESS`, or `PARTIAL_SUCCESS` when some rows
+  were invalid; rejection records `REJECTED` and the reason on every row, and the
+  upload ends as `FAIL`.
+- **Utilization assessments** (`utilization_percentage` or `utilization_confirmed`,
+  `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes`) are saved
+  through the beneficiary services. For UMEP, with
+  `enable_maker_checker_for_beneficiary_update` on, each row becomes a beneficiary
+  update task. Household beneficiaries have no update task, so UPG and RMEP rows are
+  saved directly.
 
-**Deployment:** declare the keys each programme uses in its BenefitPlan
-`beneficiary_data_schema`: RMEP and UMEP all plan, grant, cash and equipment tranche
-and utilization keys, UMEP also the service tranche keys, and UPG only the
-plan-approval and utilization keys. Set `allowed_grant_types` to `["CASH"]` for UPG,
-`["CASH", "EQUIPMENT"]` for RMEP and all three for UMEP. Do not use "Python
-Beneficiaries Update" for these columns: it bypasses the rights.
+Every file:
+
+- needs an `ID` column: the GroupBeneficiary ID for UPG and RMEP, the Beneficiary ID
+  for UMEP. Any other column must be a grant or utilization key. Plan status and
+  approval columns are refused (the approval records them), as are unknown columns
+  and files that mix grant and utilization columns; a refused file changes nothing.
+- needs the right for its columns: `210001` for grant details, `210002` for
+  utilization, or the whole upload is refused.
+- is checked row by row: the beneficiary belongs to the programme and appears in one
+  row only; a grant row has at least one value and its beneficiary has no other
+  approval waiting; `approved_grant_amount` is positive and per-tranche amounts are 0
+  or more, with at most two decimals; `utilization_confirmed` is `YES` or `NO`;
+  `utilization_percentage` is from 0 to 100; dates are `YYYY-MM-DD` or spreadsheet
+  dates; a utilization result has its date and author.
+- reads `grant_types` as a semicolon-separated list such as `CASH;EQUIPMENT`, limited
+  to the programme's `allowed_grant_types` and stored as a JSON list. A per-tranche
+  amount can be non-zero only for a recorded grant type, and a grant without cash has
+  no tranche-two amounts. Whether a tranche adds up to its share is checked by the
+  payroll, against the payment plan's percentage.
+- merges only the submitted keys, as numbers where they are numbers. A blank cell is
+  not submitted, so an upload never clears a value.
+
+Invalid rows are listed with their errors in the existing invalid-items download.
+
+**Deployment:** do not declare the grant, decision or utilization keys in the
+programme's `beneficiary_data_schema`: this upload does not need them there, and the
+generic "Python Beneficiaries Update" upload would then write them without the
+rights or the approval. Set `allowed_grant_types` to `["CASH"]` for UPG,
+`["CASH", "EQUIPMENT"]` for RMEP and all three for UMEP.
 
 ## Settings
 
