@@ -216,27 +216,7 @@ class AttendanceGrantStrategy:
 
     @staticmethod
     def _tranche_one_benefits(payment_plan):
-        """{beneficiary ID (Bill subject): [recorded tranche]} for the programme's tranche-one
-        attendance-grant benefits that were not rejected or deleted.
-
-        Each benefit records its own part and tranche (``attendance_grant``), so they are
-        found under any payment plan of the programme, including a deleted or changed one.
-        """
-        records = {}
-        for subject_id, json_ext in BenefitAttachment.objects.filter(
-                is_deleted=False,
-                benefit__is_deleted=False,
-                benefit__payrollbenefitconsumption__is_deleted=False,
-                benefit__payrollbenefitconsumption__payroll__is_deleted=False,
-                benefit__payrollbenefitconsumption__payroll__payment_plan__benefit_plan_id=payment_plan.benefit_plan_id,
-                benefit__json_ext__attendance_grant__tranche=1,
-        ).exclude(
-            benefit__status=BenefitConsumptionStatus.REJECTED,
-        ).values_list("bill__subject_id", "benefit__json_ext").distinct():
-            record = (json_ext or {}).get("attendance_grant")
-            if isinstance(record, dict):
-                records.setdefault(str(subject_id), []).append(record)
-        return records
+        return tranche_one_benefits(payment_plan.benefit_plan_id)
 
     @staticmethod
     def _log_excluded(payment_plan, payee, reason, level=logging.INFO):
@@ -302,6 +282,32 @@ class AttendanceGrantStrategy:
         benefit_service.create_or_update_benefit_attachment(Bill.objects.filter(id=bill.id), benefit_id)
         if payroll is not None:
             PayrollService(user=user).attach_benefit_to_payroll(payroll.id, benefit_id)
+
+
+def tranche_one_benefits(benefit_plan_id, beneficiary_ids=None):
+    """{beneficiary ID (Bill subject): [recorded tranche]} for the programme's tranche-one
+    attendance-grant benefits that were not rejected or deleted, optionally only for
+    ``beneficiary_ids``.
+
+    Each benefit records its own part and tranche (``attendance_grant``), so they are
+    found under any payment plan of the programme, including a deleted or changed one.
+    """
+    attachments = BenefitAttachment.objects.filter(
+        is_deleted=False,
+        benefit__is_deleted=False,
+        benefit__payrollbenefitconsumption__is_deleted=False,
+        benefit__payrollbenefitconsumption__payroll__is_deleted=False,
+        benefit__payrollbenefitconsumption__payroll__payment_plan__benefit_plan_id=benefit_plan_id,
+        benefit__json_ext__attendance_grant__tranche=1,
+    ).exclude(benefit__status=BenefitConsumptionStatus.REJECTED)
+    if beneficiary_ids is not None:
+        attachments = attachments.filter(bill__subject_id__in=[str(beneficiary_id) for beneficiary_id in beneficiary_ids])
+    records = {}
+    for subject_id, json_ext in attachments.values_list("bill__subject_id", "benefit__json_ext").distinct():
+        record = (json_ext or {}).get("attendance_grant")
+        if isinstance(record, dict):
+            records.setdefault(str(subject_id), []).append(record)
+    return records
 
 
 def _attendance_grant_plans(payment_plan):
