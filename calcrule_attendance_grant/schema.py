@@ -2,7 +2,7 @@ import graphene
 from django.core.exceptions import PermissionDenied
 
 from calcrule_attendance_grant.apps import CalcruleAttendanceGrantConfig
-from calcrule_attendance_grant.gql_mutations import SubmitBeneficiaryPlanMutation
+from calcrule_attendance_grant.gql_mutations import RecordUtilisationAssessmentMutation, SubmitBeneficiaryPlanMutation
 from calcrule_attendance_grant.gql_queries import PendingPlanApprovalGQLType
 
 VIEW_PERMS = ("gql_plans_and_grants_perms", "gql_plan_approval_perms", "gql_utilization_assessment_perms")
@@ -44,3 +44,4 @@ class Query(graphene.ObjectType):
 
 class Mutation(graphene.ObjectType):
     submit_beneficiary_plan = SubmitBeneficiaryPlanMutation.Field()
+    record_utilisation_assessment = RecordUtilisationAssessmentMutation.Field()

@@ -45,3 +45,41 @@ class SubmitBeneficiaryPlanMutation(BaseMutation):
 
     class Input(SubmitBeneficiaryPlanInput):
         pass
+
+
+class RecordUtilisationAssessmentInput(OpenIMISMutation.Input):
+    # The Beneficiary (UMEP) or, with is_group, the GroupBeneficiary (UPG, RMEP).
+    id = graphene.UUID(required=True)
+    is_group = graphene.Boolean(required=False, default_value=False)
+    # Only the assessment: utilization_percentage or utilization_confirmed, and utilization_notes.
+    json_ext = graphene.JSONString(required=True)
+
+
+class RecordUtilisationAssessmentMutation(BaseMutation):
+    """Record a beneficiary's utilization assessment, merged into its current json_ext."""
+    _mutation_class = "RecordUtilisationAssessmentMutation"
+    _mutation_module = "calcrule_attendance_grant"
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        if type(user) is AnonymousUser or not user.has_perms(
+                CalcruleAttendanceGrantConfig.gql_utilization_assessment_perms):
+            raise ValidationError("mutation.authentication_required")
+
+    @classmethod
+    def _mutate(cls, user, **data):
+        from social_protection.benefit_plan_access import require_benefit_plan_access
+        from social_protection.models import Beneficiary, GroupBeneficiary
+
+        from calcrule_attendance_grant.utilisation import record_utilisation
+
+        model = GroupBeneficiary if data.get("is_group") else Beneficiary
+        beneficiary = model.objects.filter(id=data["id"], is_deleted=False).first()
+        if beneficiary is None:
+            raise ValidationError(_("The beneficiary was not found."))
+        require_benefit_plan_access(user, beneficiary.benefit_plan_id)
+        record_utilisation(user, model, beneficiary.id, as_json_ext(data.get("json_ext")))
+        return None
+
+    class Input(RecordUtilisationAssessmentInput):
+        pass
