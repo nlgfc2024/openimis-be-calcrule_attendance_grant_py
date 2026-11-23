@@ -21,7 +21,15 @@ from project_social_protection.models import (
     GroupBeneficiaryProjectEnrollment,
     ProjectStatus,
 )
-from project_social_protection.training_topics import training_module_completion
+try:
+    # Two queries for the whole payroll; older project modules only have the
+    # per-enrollment helper.
+    from project_social_protection.training_topics import training_module_completion_for
+except ImportError:  # pragma: no cover - depends on the installed project module
+    from project_social_protection.training_topics import training_module_completion
+
+    def training_module_completion_for(enrollments):
+        return {enrollment.pk: training_module_completion(enrollment) for enrollment in enrollments}
 
 # Project.project_type of a training.
 TRAINING_PROJECT_TYPE = "TRAINING"
@@ -85,9 +93,11 @@ def evaluate_attendance(beneficiary_ids, benefit_plan, minimum_percentage, compl
         enrollments = enrollments.filter(project__status=ProjectStatus.COMPLETED)
 
     results = {str(beneficiary_id): BeneficiaryAttendance() for beneficiary_id in beneficiary_ids}
+    enrollments = list(enrollments)
+    completions = training_module_completion_for(enrollments)
     for enrollment in enrollments:
         result = results[str(getattr(enrollment, beneficiary_field))]
-        rows = [row for row in training_module_completion(enrollment) if row["total_topics"]]
+        rows = [row for row in completions.get(enrollment.pk, []) if row["total_topics"]]
         if not rows:
             result.trainings_without_topics.append(enrollment.project.name)
         for row in rows:
