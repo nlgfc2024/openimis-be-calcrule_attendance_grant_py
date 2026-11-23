@@ -28,6 +28,7 @@ from django.db import transaction
 from calcrule_attendance_grant.apps import CalcruleAttendanceGrantConfig
 from calcrule_attendance_grant.grants import CASH, GRANT_TYPES, tranche_amount_key
 from calcrule_attendance_grant.plan_approval import (
+    FROZEN_ONCE_PAID_KEYS,
     PlanApprovalService,
     beneficiary_label,
     beneficiary_type_of,
@@ -39,8 +40,10 @@ from calcrule_attendance_grant.protected_fields import (
     PLAN_AND_GRANT_KEYS,
     UTILIZATION_KEYS,
     as_json_ext,
+    changed_keys,
     check_protected_changes,
 )
+from calcrule_attendance_grant.strategy import tranche_one_benefits
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +77,15 @@ def process_grant_and_utilization_update(user_uuid, benefit_plan_uuid, upload_uu
     from social_protection.models import BenefitPlan
     from workflow.exceptions import PythonWorkflowHandlerException
 
+    from django.core.exceptions import PermissionDenied
+    from social_protection.benefit_plan_access import require_benefit_plan_access
+
     user = User.objects.get(id=user_uuid)
     benefit_plan = BenefitPlan.objects.get(id=benefit_plan_uuid, is_deleted=False)
+    try:
+        require_benefit_plan_access(user, benefit_plan.id)
+    except PermissionDenied as error:
+        raise PythonWorkflowHandlerException("The upload was refused: %s" % error)
     upload = IndividualDataSourceUpload.objects.get(id=upload_uuid)
     rows = list(IndividualDataSource.objects.filter(upload_id=upload_uuid, is_deleted=False).order_by("date_created", "id"))
     try:
@@ -119,11 +129,20 @@ class GrantUtilizationUpload:
         columns = self._columns(rows)
         self._check_columns(columns)
         self._check_rights(columns)
+        if columns & set(GRANT_KEYS):
+            # The file's beneficiaries stay locked until its approval task is created, so a
+            # submission from the form cannot slip in between.
+            with transaction.atomic():
+                return self._process(rows, upload, columns, lock=True)
+        return self._process(rows, upload, columns, lock=False)
+
+    def _process(self, rows, upload, columns, lock):
         programme = self._programme(columns)
-        beneficiaries = self._beneficiaries(rows)
+        beneficiaries = self._beneficiaries(rows, lock)
         repeated = self._repeated_ids(rows)
         is_grant_file = bool(columns & set(GRANT_KEYS))
         waiting = open_approval_beneficiary_ids(beneficiaries) if is_grant_file else set()
+        paid = set(tranche_one_benefits(self.benefit_plan.id, beneficiaries)) if is_grant_file else set()
 
         summary, proposals = UploadSummary(), []
         for row in rows:
@@ -135,6 +154,12 @@ class GrantUtilizationUpload:
                 errors.append({"field_name": ID_COLUMN, "note": "already has a plan approval waiting for a decision"})
             if not errors and is_grant_file and not patch:
                 errors.append({"field_name": None, "note": "has no grant details to submit"})
+            if not errors and is_grant_file and beneficiary_id in paid:
+                frozen = changed_keys(as_json_ext(beneficiary.json_ext), {**as_json_ext(beneficiary.json_ext), **patch},
+                                      FROZEN_ONCE_PAID_KEYS)
+                if frozen:
+                    errors.append({"field_name": frozen[0], "note": "the first tranche is already being paid, so these "
+                                                                    "can no longer change: %s" % ", ".join(frozen)})
             if not errors and is_grant_file:
                 current = as_json_ext(beneficiary.json_ext)
                 proposals.append({
@@ -222,15 +247,15 @@ class GrantUtilizationUpload:
                 (repeated if str(beneficiary_id) in seen else seen).add(str(beneficiary_id))
         return repeated
 
-    def _beneficiaries(self, rows):
+    def _beneficiaries(self, rows, lock=False):
         from social_protection.models import Beneficiary, GroupBeneficiary
 
         model = GroupBeneficiary if self.is_group else Beneficiary
         ids = {_uuid((row.json_ext or {}).get(ID_COLUMN)) for row in rows} - {None}
-        return {
-            str(beneficiary.id): beneficiary
-            for beneficiary in model.objects.filter(id__in=ids, benefit_plan=self.benefit_plan, is_deleted=False)
-        }
+        queryset = model.objects.filter(id__in=ids, benefit_plan=self.benefit_plan, is_deleted=False).order_by("id")
+        if lock:
+            queryset = queryset.select_for_update()
+        return {str(beneficiary.id): beneficiary for beneficiary in queryset}
 
     # Row validation
 

@@ -1,9 +1,11 @@
 import datetime
+from unittest.mock import patch
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.test import TestCase
 
 from core.test_helpers import LogInHelper
+from social_protection.apps import SocialProtectionConfig
 from social_protection.models import BeneficiaryStatus, GroupBeneficiary
 from social_protection.tests.test_helpers import create_group
 from tasks_management.models import Task, TaskExecutor, TaskGroup
@@ -141,20 +143,41 @@ class PlanApprovalTest(TestCase):
         self.assertEqual(self.beneficiary.json_ext["business_plan_status"], "APPROVED")
 
     def test_a_rejection_needs_a_reason_and_records_it(self):
-        approved = create_participant(self.admin, self.benefit_plan, 'Reappraised', {
-            "approved_grant_amount": 800, "business_plan_status": "APPROVED", "plan_approved_on": "2026-10-01",
-            "plan_approved_by": "Earlier", "plan_approved_by_id": "x",
-        })
-        task = self.submit(beneficiary=approved)
+        task = self.submit()
         with self.assertRaisesMessage(ValidationError, "Give a reason for rejecting the plan."):
             self.decide(self.checker, task, "FAILED", {"reason": " "})
         self.assertTrue(self.decide(self.checker, task, "FAILED", {"reason": "Not viable"})["success"])
         task.refresh_from_db()
         self.assertEqual(task.status, Task.Status.FAILED)
-        approved.refresh_from_db()
-        self.assertEqual(approved.json_ext, {
-            "approved_grant_amount": 800, "business_plan_status": "REJECTED", "plan_rejection_reason": "Not viable",
+        self.beneficiary.refresh_from_db()
+        self.assertEqual(self.beneficiary.json_ext, {
+            "note": "keep", "business_plan_status": "REJECTED", "plan_rejection_reason": "Not viable",
         })
+
+    def test_rejecting_a_change_to_an_approved_plan_keeps_the_approval(self):
+        approval = {"approved_grant_amount": 800, "business_plan_status": "APPROVED", "plan_approved_on": "2026-10-01",
+                    "plan_approved_by": "Earlier", "plan_approved_by_id": "x"}
+        approved = create_participant(self.admin, self.benefit_plan, 'Reappraised', approval)
+        task = self.submit(beneficiary=approved)
+        self.assertTrue(self.decide(self.checker, task, "FAILED", {"reason": "Not viable"})["success"])
+        approved.refresh_from_db()
+        self.assertEqual(approved.json_ext, approval)
+
+    def test_deciding_needs_access_to_the_programme(self):
+        task = self.submit()
+        with patch.object(SocialProtectionConfig, "enable_benefit_plan_access_control", True, create=True):
+            with self.assertRaises(PermissionDenied):
+                self.decide(self.checker, task)
+        task.refresh_from_db()
+        self.assertEqual(task.status, Task.Status.ACCEPTED)
+
+    def test_the_grant_is_frozen_once_its_first_tranche_is_being_paid(self):
+        paid = {str(self.beneficiary.id): [{"tranche": 1, "grant_component": "cash"}]}
+        with patch("calcrule_attendance_grant.strategy.tranche_one_benefits", return_value=paid):
+            with self.assertRaisesMessage(ValidationError, "can no longer change: approved_grant_amount"):
+                PlanApprovalService(self.maker).submit(self.beneficiary, {"approved_grant_amount": 900})
+            # The business plan reference can still be corrected.
+            PlanApprovalService(self.maker).submit(self.beneficiary, {"business_plan_reference": "BP-8"})
 
     def test_household_beneficiaries_are_approved_the_same_way(self):
         group_plan = create_programme(self.admin, 'AGAPPRG', json_ext={"allowed_grant_types": ["CASH"]},

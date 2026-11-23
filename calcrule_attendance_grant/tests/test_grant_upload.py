@@ -6,7 +6,7 @@ from django.test import TestCase
 from core.test_helpers import LogInHelper
 from individual.models import IndividualDataSource, IndividualDataSourceUpload
 from social_protection.apps import SocialProtectionConfig
-from social_protection.models import BeneficiaryStatus, GroupBeneficiary
+from social_protection.models import Beneficiary, BeneficiaryStatus, GroupBeneficiary
 from social_protection.tests.test_helpers import create_group
 from tasks_management.models import Task, TaskExecutor, TaskGroup
 from tasks_management.services import TaskService
@@ -172,6 +172,37 @@ class GrantUploadTest(TestCase):
         self.decide(self.task(upload))
         upload.refresh_from_db()
         self.assertEqual(upload.status, "PARTIAL_SUCCESS")
+
+    def test_an_upload_needs_access_to_the_programme(self):
+        with patch.object(SocialProtectionConfig, "enable_benefit_plan_access_control", True, create=True):
+            with self.assertRaisesMessage(PythonWorkflowHandlerException, "The upload was refused"):
+                self.upload({"ID": str(self.beneficiary.id), "approved_grant_amount": 1000})
+
+    def test_rows_whose_first_tranche_is_being_paid_cannot_change_the_grant(self):
+        paid = {str(self.beneficiary.id): [{"tranche": 1, "grant_component": "cash"}]}
+        with patch("calcrule_attendance_grant.upload.tranche_one_benefits", return_value=paid):
+            upload, _ = self.upload({"ID": str(self.beneficiary.id), "approved_grant_amount": 1000},
+                                    {"ID": str(self.other.id), "approved_grant_amount": 1000})
+        self.assertIn("the first tranche is already being paid", row_errors(upload)[str(self.beneficiary.id)][0]["note"])
+        self.assertEqual(row_errors(upload)[str(self.other.id)], [])
+
+    def test_an_approval_that_fails_midway_saves_no_row(self):
+        upload, _ = self.upload({"ID": str(self.beneficiary.id), "approved_grant_amount": 1000},
+                                {"ID": str(self.other.id), "approved_grant_amount": 1100})
+        original_save, calls = Beneficiary.save, []
+
+        def failing_second_save(instance, *args, **kwargs):
+            calls.append(instance.id)
+            if len(calls) == 2:
+                raise RuntimeError("storage failed")
+            return original_save(instance, *args, **kwargs)
+
+        with patch.object(Beneficiary, "save", failing_second_save):
+            self.decide(self.task(upload))
+        upload.refresh_from_db()
+        self.assertEqual(upload.status, "FAIL")
+        self.beneficiary.refresh_from_db()
+        self.assertNotIn("approved_grant_amount", self.beneficiary.json_ext)
 
     def test_rows_are_checked(self):
         upload, summary = self.upload(
