@@ -144,7 +144,7 @@ mutations accept the whole `json_ext`, so the module protects them:
 |---|---|
 | Grant: `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference` | Only through a plan approval (below): submitted with right `210001`. |
 | Decision: `business_plan_status`, `plan_approved_on`, `plan_approved_by`, `plan_approved_by_id`, `plan_rejection_reason` | Only through a plan approval: recorded when a user with right `210003` decides. |
-| Utilization: `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` | Saved directly by users with right `210002`. A result needs `utilization_assessed_on` and `utilization_assessed_by`. |
+| Utilization: `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` | Saved directly by users with right `210002`, from the beneficiary page with the `recordUtilisationAssessment` mutation (below) or the upload. A result needs `utilization_assessed_on` and `utilization_assessed_by`. |
 
 Before-hooks on `beneficiary_service.create` / `update` and
 `group_beneficiary_service.create` / `update` reject any other change to these keys,
@@ -163,18 +163,25 @@ Plan approval uses the CoreMIS maker-checker tasks:
    checked (grant types the programme allows; amounts as numbers, at most two
    decimals, the grant above 0) and becomes a task with source and business event
    `calcrule_attendance_grant.plan_approval`, holding the proposed values. The
-   beneficiary does not change yet, and only one approval can be open per beneficiary.
+   beneficiary does not change yet. Only one approval can be open per beneficiary:
+   the beneficiary is locked while a submission is checked and created, so two
+   requests cannot both create one. Once any part of the first tranche is paid, the
+   grant types, amount and tranche amounts can no longer change; the business plan
+   reference can.
 2. The task goes to the task group whose `task_sources` include
    `calcrule_attendance_grant.plan_approval`. Its executors approve or reject it with
    the standard task resolution, under the group's completion policy. Deciding needs
-   right `210003` and a place among the group's executors; IMIS administrators may
-   decide any approval. A rejection needs a reason, given as the resolution's
+   right `210003`, access to every programme the task touches, and a place among the
+   group's executors; IMIS administrators may decide any approval. A rejection needs a reason, given as the resolution's
    `additional_data` (`{"reason": "..."}`).
 3. When the task completes, the proposed values are saved with
    `business_plan_status = APPROVED`, and the user who completed it is recorded as
    `plan_approved_by` (name), `plan_approved_by_id` and `plan_approved_on` (today).
-   When it fails, the proposal is dropped, `business_plan_status = REJECTED` and the
-   reason is recorded as `plan_rejection_reason`.
+   When it fails, the proposal is dropped; a plan that was never approved gets
+   `business_plan_status = REJECTED` and the reason as `plan_rejection_reason`, while
+   a rejected change to an approved plan leaves the approval as it was, with the
+   reason on the task. A decision is saved on all of a task's beneficiaries or none;
+   an upload whose decision cannot be saved ends as `FAIL` with the error.
 
 Who may submit and who may decide is set by roles and task groups, as elsewhere in
 CoreMIS: an administrator can let one user do both, or give the decision to others.
@@ -184,6 +191,18 @@ code) for the reviewer. The `pendingBeneficiaryPlanApproval(beneficiaryId, isGro
 query returns a beneficiary's waiting approval (task, form or upload, submitter,
 date and proposed values) to users holding any of the three rights, since makers
 cannot see tasks outside their task groups.
+
+### Utilization assessment from the beneficiary page
+
+The `recordUtilisationAssessment` mutation (`id`, `isGroup`, `jsonExt` with
+`utilization_percentage` or `utilization_confirmed`, and `utilization_notes`) needs
+right `210002` and access to the programme. It merges only these keys into the
+beneficiary's current `json_ext` under a row lock, so a change made elsewhere since
+the page loaded is kept, and keeps the record's own status. A new or changed result
+or note is dated today and signed by the user; clearing the result removes the date
+and author. It saves through the beneficiary services, as an update task when the
+beneficiary update mutations create tasks (`gql_check_beneficiary_crud`,
+`gql_check_group_beneficiary_crud`).
 
 The generic "Python Beneficiaries Update" upload writes `json_ext` in SQL, so these
 hooks do not see it. It only writes keys declared in the programme's
@@ -224,11 +243,13 @@ Every file:
   for UMEP. Any other column must be a grant or utilization key. Plan status and
   approval columns are refused (the approval records them), as are unknown columns
   and files that mix grant and utilization columns; a refused file changes nothing.
-- needs the right for its columns: `210001` for grant details, `210002` for
-  utilization, or the whole upload is refused.
+- needs access to the programme and the right for its columns: `210001` for grant
+  details, `210002` for utilization, or the whole upload is refused.
 - is checked row by row: the beneficiary belongs to the programme and appears in one
-  row only; a grant row has at least one value and its beneficiary has no other
-  approval waiting; `approved_grant_amount` is positive and per-tranche amounts are 0
+  row only; a grant row has at least one value, its beneficiary has no other
+  approval waiting, and it does not change the grant of a beneficiary whose first
+  tranche is being paid (the file's beneficiaries are locked until its task is
+  created); `approved_grant_amount` is positive and per-tranche amounts are 0
   or more, with at most two decimals; `utilization_confirmed` is `YES` or `NO`;
   `utilization_percentage` is from 0 to 100; dates are `YYYY-MM-DD` or spreadsheet
   dates; a utilization result has its date and author.
