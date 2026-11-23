@@ -148,3 +148,26 @@ class PlanApprovalTest(TestCase):
         self.assertEqual(household.json_ext["business_plan_reference"], "HH-1")
         self.assertEqual(household.json_ext["business_plan_status"], "APPROVED")
 
+
+class SubmitBeneficiaryPlanMutationTest(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = LogInHelper().get_or_create_user_api()
+        cls.benefit_plan = create_programme(cls.admin, 'AGAPPRM', json_ext={"allowed_grant_types": ["CASH", "EQUIPMENT"]})
+        cls.maker = user_with("ag_pam_maker", "gql_plans_and_grants_perms")
+        cls.clerk = user_with("ag_pam_clerk")
+        cls.beneficiary = create_participant(cls.admin, cls.benefit_plan, 'Submitted', {})
+
+    def mutate(self, user, json_ext):
+        from calcrule_attendance_grant.gql_mutations import SubmitBeneficiaryPlanMutation
+        return SubmitBeneficiaryPlanMutation.async_mutate(
+            user, id=self.beneficiary.id, is_group=False, json_ext=json_ext)
+
+    def test_the_mutation_submits_for_approval(self):
+        self.assertIsNone(self.mutate(self.maker, '{"approved_grant_amount": 1000}'))
+        task = Task.objects.get(entity_id=str(self.beneficiary.id))
+        self.assertEqual(task.data["incoming_data"], {"approved_grant_amount": 1000})
+
+    def test_the_mutation_needs_the_plans_and_grants_right(self):
+        self.assertIn("authentication_required", str(self.mutate(self.clerk, '{"approved_grant_amount": 1000}')))
+        self.assertFalse(Task.objects.filter(entity_id=str(self.beneficiary.id)).exists())
