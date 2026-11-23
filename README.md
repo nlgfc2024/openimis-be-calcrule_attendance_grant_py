@@ -139,7 +139,7 @@ empty choice (`null`) counts as not set.
 | `grant_component` | required | `cash` or `in_kind`: the part of each tranche this plan pays. |
 | `grant_amount_source` | required | `payment_plan` or `beneficiary_json`. |
 | `grant_amount` | required for `payment_plan` | Programme-wide grant amount. |
-| `tranche_percentage` | `70` | The tranche's share of A for grants that include cash. |
+| `tranche_percentage` | `70` | The tranche's share of A for grants that include cash. A tranche's cash and in-kind plans must use the same value: a plan whose value differs from another attendance-grant plan of the programme stops with a configuration error. |
 | `minimum_attendance_percentage` | `80`; required, and at least `training_disqualification_percentage`, for a programme that sets it (UMEP: 90) | Completion each module needs. |
 
 Second-tranche plans (`requires_reconciled_payment_plan_ids`) are refused for now.

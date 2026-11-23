@@ -39,6 +39,7 @@ class AttendanceGrantStrategy:
     def calculate(cls, calculation, payment_plan, **kwargs):
         params = GrantParameters.from_payment_plan(payment_plan)
         cls._check_household_payee(payment_plan)
+        cls._check_tranche_percentage(payment_plan, params)
         with transaction.atomic():
             # One run at a time per programme, so two payrolls never both see a
             # participant as unpaid. The lock holds until the payroll is saved.
@@ -160,6 +161,24 @@ class AttendanceGrantStrategy:
         }
 
     @staticmethod
+    def _check_tranche_percentage(payment_plan, params):
+        """A tranche's cash and in-kind plans must use the same tranche percentage, or
+        their parts would not add up to one share. Every plan is a tranche-one plan
+        until tranche two is supported."""
+        others = [
+            plan for plan in _attendance_grant_plans(payment_plan)
+            if plan.id != payment_plan.id and _plan_tranche_percentage(plan) != params.tranche_percentage
+        ]
+        if others:
+            raise AttendanceGrantConfigurationError(
+                "Payment plan %s cannot be calculated with the attendance-grant rule: its tranche_percentage "
+                "(%s) differs from the programme's other attendance-grant plans for the same tranche: %s. "
+                "A tranche's cash and in-kind plans must use the same percentage."
+                % (payment_plan.code, f"{params.tranche_percentage.normalize():f}", ", ".join(
+                    "%s (%s)" % (plan.code, _format(_plan_tranche_percentage(plan))) for plan in others))
+            )
+
+    @staticmethod
     def _check_household_payee(payment_plan):
         """A household programme pays its primary worker, so the payroll must make
         household benefits payable to the primary worker too."""
@@ -182,13 +201,8 @@ class AttendanceGrantStrategy:
         tranche: a benefit that was not rejected under any attendance-grant plan of the
         programme that pays the same part, this plan included, so a plan re-created to
         fix a mistake does not pay again."""
-        from contribution_plan.models import PaymentPlan
-
         plans = [
-            plan.id for plan in PaymentPlan.objects.filter(
-                benefit_plan_id=payment_plan.benefit_plan_id, calculation=payment_plan.calculation,
-                is_deleted=False,
-            )
+            plan.id for plan in _attendance_grant_plans(payment_plan)
             if plan.id == payment_plan.id or _plan_component(plan) == grant_component
         ]
         return set(
@@ -269,6 +283,28 @@ class AttendanceGrantStrategy:
             PayrollService(user=user).attach_benefit_to_payroll(payroll.id, benefit_id)
 
 
+def _attendance_grant_plans(payment_plan):
+    """The live attendance-grant PaymentPlans of the plan's programme, the plan included."""
+    from contribution_plan.models import PaymentPlan
+
+    return list(PaymentPlan.objects.filter(
+        benefit_plan_id=payment_plan.benefit_plan_id, calculation=payment_plan.calculation, is_deleted=False,
+    ))
+
+
+def _plan_rule(payment_plan):
+    rule = payment_plan.json_ext.get("calculation_rule") if isinstance(payment_plan.json_ext, dict) else None
+    return rule if isinstance(rule, dict) else {}
+
+
+def _plan_tranche_percentage(payment_plan):
+    """The plan's tranche percentage as the rule reads it; an invalid one counts as unset."""
+    return GrantParameters.tranche_percentage_of(_plan_rule(payment_plan))
+
+
+def _format(value):
+    return f"{value.normalize():f}" if hasattr(value, "normalize") else str(value)
+
+
 def _plan_component(payment_plan):
-    rule = (payment_plan.json_ext or {}).get("calculation_rule") if isinstance(payment_plan.json_ext, dict) else None
-    return rule.get("grant_component") if isinstance(rule, dict) else None
+    return _plan_rule(payment_plan).get("grant_component")

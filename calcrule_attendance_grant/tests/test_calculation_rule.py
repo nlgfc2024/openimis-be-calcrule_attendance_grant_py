@@ -257,6 +257,20 @@ class RmepCashAndInKindGrantTest(AttendanceGrantRunMixin, TestCase):
             individual_id=self.mixed.individual_id)
         self.assertEqual(cash.amount + in_kind.amount, Decimal("700.00"))
 
+    def test_a_tranches_plans_must_use_the_same_tranche_percentage(self):
+        cash = self.payment_plan(tranche_percentage="70")
+        in_kind = self.payment_plan(grant_component="in_kind", tranche_percentage="60")
+        for plan in (cash, in_kind):
+            with self.subTest(plan=plan.code):
+                with self.assertRaisesMessage(AttendanceGrantConfigurationError,
+                                              "A tranche's cash and in-kind plans must use the same percentage"):
+                    self.run_payroll(plan)
+        self.assertFalse(BenefitConsumption.objects.filter(individual=self.mixed.individual).exists())
+
+    def test_the_same_percentage_written_differently_matches(self):
+        self.payment_plan(grant_component="in_kind", tranche_percentage=70)
+        self.assertEqual(self.benefits(self.run_payroll(self.payment_plan(tranche_percentage="70.0"))).count(), 1)
+
     def test_invalid_amounts_or_make_up_exclude_the_beneficiary(self):
         cases = {
             'NoAmount': ({"grant_types": ["CASH"]}, "approved_grant_amount is missing"),
