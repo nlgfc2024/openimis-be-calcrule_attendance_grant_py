@@ -185,6 +185,8 @@ def pending_approval(beneficiary):
     task = open_tasks.filter(business_event=BUSINESS_EVENT, entity_id=beneficiary_id).first()
     if task is not None:
         return task, task.data.get("incoming_data") or {}
+    # data__rows__contains is a JSON containment lookup: PostgreSQL supports it, MSSQL
+    # does not. The training instances run PostgreSQL.
     task = open_tasks.filter(business_event=UPLOAD_BUSINESS_EVENT,
                              data__rows__contains=[{"id": beneficiary_id}]).first()
     if task is not None:
@@ -206,6 +208,7 @@ def open_approval_beneficiary_ids(beneficiary_ids):
                   .values_list("entity_id", flat=True))
     upload_rows = Q()
     for beneficiary_id in ids:
+        # PostgreSQL JSON containment, see pending_approval.
         upload_rows |= Q(data__rows__contains=[{"id": beneficiary_id}])
     for rows in open_tasks.filter(upload_rows, business_event=UPLOAD_BUSINESS_EVENT).values_list("data__rows", flat=True):
         waiting |= {row.get("id") for row in rows or []} & ids
@@ -280,6 +283,34 @@ def check_decision(user, task, business_status, additional_data):
                                     "or reject it."))
     if decision == "FAILED" and not rejection_reason(additional_data):
         raise ValidationError(_("Give a reason for rejecting the plan."))
+    if decision == TasksManagementConfig.task_user_approved:
+        frozen = frozen_proposals(task)
+        if frozen:
+            raise ValidationError(frozen)
+
+
+def frozen_proposals(task):
+    """Why the task's proposals can no longer be approved, or None: a first tranche paid
+    since they were submitted freezes the grant they would change."""
+    model = beneficiary_model(task.data.get(BENEFICIARY_TYPE_KEY, INDIVIDUAL_BENEFICIARY))
+    problems = []
+    for beneficiary_id, proposal in task_proposals(task):
+        beneficiary = model.objects.filter(id=beneficiary_id, is_deleted=False).first()
+        if beneficiary is None:
+            continue
+        frozen = frozen_changes(beneficiary, as_json_ext(beneficiary.json_ext), proposal)
+        if frozen:
+            problems.append("%s: %s" % (beneficiary_label(beneficiary), frozen))
+    if problems:
+        return _("These grant changes can no longer be approved; reject them instead. %s") % " ".join(problems)
+    return None
+
+
+def task_proposals(task):
+    """[(beneficiary ID, proposed values)] of a form or upload approval task."""
+    if task.business_event == UPLOAD_BUSINESS_EVENT:
+        return [(row["id"], row.get("incoming_data") or {}) for row in task.data.get("rows") or []]
+    return [(task.entity_id, task.data.get("incoming_data") or {})]
 
 
 def task_benefit_plan_ids(task):
@@ -320,18 +351,18 @@ def apply_decision(task, user):
         ((task.json_ext or {}).get("additional_resolve_data") or {}).get(str(user.id)))
     model = beneficiary_model(task.data.get(BENEFICIARY_TYPE_KEY, INDIVIDUAL_BENEFICIARY))
 
-    if task.business_event == UPLOAD_BUSINESS_EVENT:
-        proposals = [(row["id"], row.get("incoming_data") or {}) for row in task.data.get("rows") or []]
-    else:
-        proposals = [(task.entity_id, task.data.get("incoming_data") or {})]
-
     try:
         with transaction.atomic(), applying_plan_decision():
-            for beneficiary_id, proposal in proposals:
+            for beneficiary_id, proposal in task_proposals(task):
                 beneficiary = model.objects.select_for_update().filter(id=beneficiary_id, is_deleted=False).first()
                 if beneficiary is None:
                     logger.warning("Plan approval task %s: beneficiary %s no longer exists", task.id, beneficiary_id)
                     continue
+                if approved:
+                    # A first tranche paid between the decision and now freezes the grant too.
+                    frozen = frozen_changes(beneficiary, as_json_ext(beneficiary.json_ext), proposal)
+                    if frozen:
+                        raise ValidationError(frozen)
                 decided = decided_json_ext(beneficiary.json_ext, proposal, approved, user, reason)
                 if decided != as_json_ext(beneficiary.json_ext):
                     beneficiary.json_ext = decided

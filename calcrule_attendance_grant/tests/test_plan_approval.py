@@ -171,6 +171,29 @@ class PlanApprovalTest(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, Task.Status.ACCEPTED)
 
+    def test_a_change_cannot_be_approved_once_the_first_tranche_is_paid_after_submission(self):
+        task = self.submit()
+        paid = {str(self.beneficiary.id): [{"tranche": 1, "grant_component": "cash"}]}
+        with patch("calcrule_attendance_grant.strategy.tranche_one_benefits", return_value=paid):
+            with self.assertRaisesMessage(ValidationError, "can no longer be approved; reject them instead"):
+                self.decide(self.checker, task)
+            # Rejecting it is still possible.
+            self.assertTrue(self.decide(self.checker, task, "FAILED", {"reason": "Already paid"})["success"])
+        self.beneficiary.refresh_from_db()
+        self.assertNotIn("approved_grant_amount", self.beneficiary.json_ext)
+
+    def test_a_tranche_paid_while_the_approval_completes_fails_the_decision(self):
+        from calcrule_attendance_grant.plan_approval import apply_decision
+
+        task = self.submit()
+        task.status = Task.Status.COMPLETED
+        paid = {str(self.beneficiary.id): [{"tranche": 1, "grant_component": "cash"}]}
+        with patch("calcrule_attendance_grant.strategy.tranche_one_benefits", return_value=paid):
+            with self.assertRaisesMessage(ValidationError, "can no longer change"):
+                apply_decision(task, self.checker)
+        self.beneficiary.refresh_from_db()
+        self.assertNotIn("approved_grant_amount", self.beneficiary.json_ext)
+
     def test_the_grant_is_frozen_once_its_first_tranche_is_being_paid(self):
         paid = {str(self.beneficiary.id): [{"tranche": 1, "grant_component": "cash"}]}
         with patch("calcrule_attendance_grant.strategy.tranche_one_benefits", return_value=paid):
