@@ -51,6 +51,8 @@ class BeneficiaryAttendance:
     # Best result per module ID, in sheet order.
     modules: dict = field(default_factory=dict)
     shortfalls: list = field(default_factory=list)
+    # Names of the beneficiary's trainings whose attendance sheet has no topics.
+    trainings_without_topics: list = field(default_factory=list)
 
     @property
     def eligible(self):
@@ -85,9 +87,10 @@ def evaluate_attendance(beneficiary_ids, benefit_plan, minimum_percentage, compl
     results = {str(beneficiary_id): BeneficiaryAttendance() for beneficiary_id in beneficiary_ids}
     for enrollment in enrollments:
         result = results[str(getattr(enrollment, beneficiary_field))]
-        for row in training_module_completion(enrollment):
-            if not row["total_topics"]:
-                continue
+        rows = [row for row in training_module_completion(enrollment) if row["total_topics"]]
+        if not rows:
+            result.trainings_without_topics.append(enrollment.project.name)
+        for row in rows:
             completion = ModuleCompletion(
                 module_name=row["module"]["name"],
                 ticked_topics=row["ticked_topics"],
@@ -101,7 +104,11 @@ def evaluate_attendance(beneficiary_ids, benefit_plan, minimum_percentage, compl
     training_kind = "completed training" if completed_only else "training"
     for result in results.values():
         if not result.modules:
-            result.shortfalls.append(f"not enrolled in a {training_kind} of the programme")
+            if result.trainings_without_topics:
+                result.shortfalls.append("enrolled in %s, whose attendance sheet has no topics yet" % ", ".join(
+                    f"'{name}'" for name in result.trainings_without_topics))
+            else:
+                result.shortfalls.append(f"not enrolled in a {training_kind} of the programme")
             continue
         for completion in result.modules.values():
             if not completion.meets(minimum_percentage):

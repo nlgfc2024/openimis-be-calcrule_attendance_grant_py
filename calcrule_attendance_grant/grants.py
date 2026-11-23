@@ -55,6 +55,8 @@ class Grant:
     share: Decimal = None
     # Amount of S per grant type; every grant type has an entry.
     amounts: dict = field(default_factory=dict)
+    # Likely data-entry slips that did not stop the payment, for the log.
+    notes: tuple = ()
 
     def part(self, grant_component):
         """The part of S paid by a cash or an in-kind PaymentPlan."""
@@ -93,7 +95,20 @@ def resolve_grant(json_ext, *, allowed_grant_types, grant_amount_source_is_plan,
         return Grant(reason=reason)
     return Grant(
         grant_types=grant_types, grant_amount=grant_amount, percentage=percentage,
-        share=share, amounts=amounts,
+        share=share, amounts=amounts, notes=_missing_in_kind_notes(json_ext, grant_types, tranche),
+    )
+
+
+def _missing_in_kind_notes(json_ext, grant_types, tranche):
+    """Tranche one delivers the in-kind part, so an in-kind grant type without an amount
+    there, counted as 0 because other amounts are recorded, is more likely a slip."""
+    if tranche != 1:
+        return ()
+    return tuple(
+        "%s is missing and counts as 0 although %s is one of the grant types"
+        % (tranche_amount_key(tranche, grant_type), grant_type)
+        for grant_type in grant_types
+        if grant_type != CASH and json_ext.get(tranche_amount_key(tranche, grant_type)) is None
     )
 
 

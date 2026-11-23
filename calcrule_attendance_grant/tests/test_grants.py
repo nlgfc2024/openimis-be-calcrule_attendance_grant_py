@@ -26,17 +26,20 @@ def resolve(json_ext, allowed=RMEP, plan_amount=None, percentage="70", tranche=1
 
 
 class PlanApprovalTest(SimpleTestCase):
-    def test_an_approved_plan_with_a_date_passes(self):
+    def test_a_plan_approved_through_a_plan_approval_passes(self):
         self.assertIsNone(plan_approval_shortfall(
-            {"business_plan_status": "APPROVED", "plan_approved_on": "2026-11-01"}))
+            {"business_plan_status": "APPROVED", "plan_approved_on": "2026-11-01", "plan_approved_by_id": "u1"}))
 
-    def test_other_statuses_and_missing_dates_fail_with_a_reason(self):
+    def test_other_statuses_and_missing_approval_details_fail_with_a_reason(self):
         cases = {
             "business plan not approved (no business_plan_status)": {},
             "business plan not approved (business_plan_status is 'PENDING')": {
                 "business_plan_status": "PENDING", "plan_approved_on": "2026-11-01"},
             "business plan approved without plan_approved_on": {
-                "business_plan_status": "APPROVED", "plan_approved_on": " "},
+                "business_plan_status": "APPROVED", "plan_approved_on": " ", "plan_approved_by_id": "u1"},
+            # Marked approved outside a plan approval, so nobody is recorded as approver.
+            "business plan approved without plan_approved_by_id": {
+                "business_plan_status": "APPROVED", "plan_approved_on": "2026-11-01"},
         }
         for reason, json_ext in cases.items():
             with self.subTest(reason=reason):
@@ -129,6 +132,15 @@ class TrancheMakeUpTest(SimpleTestCase):
         # Tranche two needs no recorded amounts: it is the plan's share in cash.
         self.assertEqual(resolve(json_ext, allowed=UMEP, percentage="30", tranche=2).amounts, {
             "CASH": Decimal("300.00"), "EQUIPMENT": Decimal("0.00"), "SERVICE": Decimal("0.00")})
+
+    def test_a_missing_in_kind_amount_next_to_a_recorded_cash_amount_is_noted(self):
+        grant = resolve({
+            "grant_types": ["CASH", "EQUIPMENT"], "approved_grant_amount": 1000, "tranche_1_cash_amount": 700,
+        })
+        self.assertIsNone(grant.reason)
+        self.assertEqual(grant.notes, (
+            "tranche_1_equipment_amount is missing and counts as 0 although EQUIPMENT is one of the grant types",))
+        self.assertEqual(resolve({"grant_types": ["CASH"], "approved_grant_amount": 1000}).notes, ())
 
     def test_a_cash_only_grant_needs_no_recorded_split(self):
         grant = resolve({"grant_types": ["CASH"], "approved_grant_amount": 1000})

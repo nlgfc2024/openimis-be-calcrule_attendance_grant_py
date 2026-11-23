@@ -1,5 +1,7 @@
 import logging
 
+from django.db import transaction
+
 from core.models import User
 from invoice.models import Bill
 from invoice.services import BillService
@@ -7,8 +9,9 @@ from payroll.models import BenefitAttachment, BenefitConsumptionStatus
 from payroll.services import BenefitConsumptionService, PayrollService
 
 from calcrule_attendance_grant.approval import plan_approval_shortfall
-from calcrule_attendance_grant.attendance import evaluate_attendance
+from calcrule_attendance_grant.attendance import GROUP_BENEFIT_PLAN, evaluate_attendance
 from calcrule_attendance_grant.beneficiaries import select_payees
+from calcrule_attendance_grant.exceptions import AttendanceGrantConfigurationError
 from calcrule_attendance_grant.converters import (
     BeneficiaryToBillConverter,
     BeneficiaryToBillItemConverter,
@@ -21,6 +24,10 @@ from calcrule_attendance_grant.parameters import GRANT_SOURCE_PAYMENT_PLAN, Gran
 
 logger = logging.getLogger(__name__)
 
+# The payroll setting that must make household benefits payable to the primary
+# worker, the person whose attendance and plan this rule checks.
+PRIMARY_WORKER_PAYEE = "PRIMARY_WORKER"
+
 
 class AttendanceGrantError(Exception):
     """A Bill or BenefitConsumption could not be saved; the payroll run stops."""
@@ -31,6 +38,16 @@ class AttendanceGrantStrategy:
     @classmethod
     def calculate(cls, calculation, payment_plan, **kwargs):
         params = GrantParameters.from_payment_plan(payment_plan)
+        cls._check_household_payee(payment_plan)
+        with transaction.atomic():
+            # One run at a time per programme, so two payrolls never both see a
+            # participant as unpaid. The lock holds until the payroll is saved.
+            type(payment_plan.benefit_plan).objects.select_for_update().filter(
+                id=payment_plan.benefit_plan_id).first()
+            return cls._calculate(calculation, payment_plan, params, **kwargs)
+
+    @classmethod
+    def _calculate(cls, calculation, payment_plan, params, **kwargs):
         payroll = kwargs.get("payroll")
         user_id, _start_date, end_date, payment_cycle = \
             calculation.get_payment_cycle_parameters(**kwargs)
@@ -46,7 +63,7 @@ class AttendanceGrantStrategy:
             params.minimum_attendance_percentage,
             params.programme.counts_completed_trainings_only,
         )
-        already_paid = cls._beneficiaries_with_benefits(payment_plan)
+        already_paid = cls._beneficiaries_with_benefits(payment_plan, params.grant_component)
 
         paid = 0
         for payee in payees:
@@ -54,7 +71,8 @@ class AttendanceGrantStrategy:
             if str(beneficiary.id) in already_paid:
                 cls._log_excluded(
                     payment_plan, payee,
-                    "already has a benefit under this payment plan that is not rejected",
+                    "already has a %s benefit for this tranche that is not rejected"
+                    % params.grant_component.replace("_", "-"),
                 )
                 continue
             if payee.reason:
@@ -78,6 +96,8 @@ class AttendanceGrantStrategy:
             if grant.reason:
                 cls._log_excluded(payment_plan, payee, grant.reason, level=logging.WARNING)
                 continue
+            for note in grant.notes:
+                logger.warning("Attendance grant, payment plan %s: %s: %s.", payment_plan.code, payee.label, note)
             amount = grant.part(params.grant_component)
             if not amount:
                 cls._log_excluded(
@@ -140,16 +160,44 @@ class AttendanceGrantStrategy:
         }
 
     @staticmethod
-    def _beneficiaries_with_benefits(payment_plan):
-        """IDs of the beneficiaries (Bill subjects) with a benefit under this plan
-        that was not rejected."""
+    def _check_household_payee(payment_plan):
+        """A household programme pays its primary worker, so the payroll must make
+        household benefits payable to the primary worker too."""
+        if payment_plan.benefit_plan.type != GROUP_BENEFIT_PLAN:
+            return
+        from payroll.apps import PayrollConfig
+
+        payee = getattr(PayrollConfig, "group_benefit_payee", None)
+        if payee != PRIMARY_WORKER_PAYEE:
+            raise AttendanceGrantConfigurationError(
+                "Payment plan %s cannot be calculated with the attendance-grant rule: the payroll module's "
+                "group_benefit_payee is %r, so household benefits would be paid to someone other than the "
+                "primary worker whose attendance and plan were checked; set it to %s."
+                % (payment_plan.code, payee, PRIMARY_WORKER_PAYEE)
+            )
+
+    @staticmethod
+    def _beneficiaries_with_benefits(payment_plan, grant_component):
+        """IDs of the beneficiaries (Bill subjects) already paid this part of the
+        tranche: a benefit that was not rejected under any attendance-grant plan of the
+        programme that pays the same part, this plan included, so a plan re-created to
+        fix a mistake does not pay again."""
+        from contribution_plan.models import PaymentPlan
+
+        plans = [
+            plan.id for plan in PaymentPlan.objects.filter(
+                benefit_plan_id=payment_plan.benefit_plan_id, calculation=payment_plan.calculation,
+                is_deleted=False,
+            )
+            if plan.id == payment_plan.id or _plan_component(plan) == grant_component
+        ]
         return set(
             BenefitAttachment.objects.filter(
                 is_deleted=False,
                 benefit__is_deleted=False,
                 benefit__payrollbenefitconsumption__is_deleted=False,
                 benefit__payrollbenefitconsumption__payroll__is_deleted=False,
-                benefit__payrollbenefitconsumption__payroll__payment_plan=payment_plan,
+                benefit__payrollbenefitconsumption__payroll__payment_plan_id__in=plans,
             ).exclude(
                 benefit__status=BenefitConsumptionStatus.REJECTED,
             ).values_list("bill__subject_id", flat=True)
@@ -219,3 +267,8 @@ class AttendanceGrantStrategy:
         benefit_service.create_or_update_benefit_attachment(Bill.objects.filter(id=bill.id), benefit_id)
         if payroll is not None:
             PayrollService(user=user).attach_benefit_to_payroll(payroll.id, benefit_id)
+
+
+def _plan_component(payment_plan):
+    rule = (payment_plan.json_ext or {}).get("calculation_rule") if isinstance(payment_plan.json_ext, dict) else None
+    return rule.get("grant_component") if isinstance(rule, dict) else None
