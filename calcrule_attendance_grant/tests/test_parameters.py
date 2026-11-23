@@ -143,11 +143,20 @@ class GrantParametersTest(SimpleTestCase):
                 plan = payment_plan_stub(self.rule(), benefit_plan_type=benefit_plan_type)
                 self.assertEqual(GrantParameters.from_payment_plan(plan).grant_component, "cash")
 
-    def test_rejects_second_tranche_plans_until_supported(self):
-        self.assert_configuration_error(
-            "second-tranche plans (requires_reconciled_payment_plan_ids) are not supported yet",
-            rule=self.rule(requires_reconciled_payment_plan_ids=["5"]),
-        )
+    def test_a_tranche_two_plan_pays_cash_against_a_utilization_measure(self):
+        params = self.parse(tranche=2, utilization_measure="percentage", grant_amount_source="null", grant_amount="")
+        self.assertEqual((params.tranche, params.tranche_percentage, params.minimum_utilization_percentage),
+                         (2, Decimal("30"), Decimal("80")))
+        self.assertEqual(self.parse(tranche="2", utilization_measure="yes_no").utilization_measure, "yes_no")
+        self.assert_configuration_error("a tranche-two plan needs utilization_measure", rule=self.rule(tranche=2))
+        self.assert_configuration_error("tranche two is paid in cash only",
+                                        rule=self.rule(tranche=2, utilization_measure="yes_no", grant_component="in_kind"))
+        self.assert_configuration_error("tranche must be 1 or 2", rule=self.rule(tranche=3))
+
+    def test_a_tranche_two_plan_needs_no_attendance_minimum(self):
+        umep = {"allowed_grant_types": ["CASH"], "training_disqualification_percentage": 90}
+        plan = payment_plan_stub(self.rule(tranche=2, utilization_measure="yes_no"), programme=umep)
+        self.assertEqual(GrantParameters.from_payment_plan(plan).tranche, 2)
 
     def test_lists_every_problem_with_the_plan_code(self):
         message = self.assert_configuration_error(

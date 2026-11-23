@@ -10,6 +10,18 @@ CLASS_RULE_PARAM_VALIDATION = [
         "parameters": [
             {
                 "type": "select",
+                "name": "tranche",
+                "label": {"en": "Tranche", "fr": "Tranche"},
+                "rights": PAYMENT_PLAN_RIGHTS,
+                "relevance": "True",
+                "optionSet": [
+                    {"value": "1", "label": {"en": "Tranche 1", "fr": "Tranche 1"}},
+                    {"value": "2", "label": {"en": "Tranche 2 (cash)", "fr": "Tranche 2 (espèces)"}},
+                ],
+                "default": "1",
+            },
+            {
+                "type": "select",
                 "name": "grant_component",
                 "label": {"en": "Grant part paid", "fr": "Partie de la subvention payée"},
                 "rights": PAYMENT_PLAN_RIGHTS,
@@ -52,7 +64,8 @@ CLASS_RULE_PARAM_VALIDATION = [
                 "rights": PAYMENT_PLAN_RIGHTS,
                 "relevance": "True",
                 "condition": "INPUT>0",
-                "default": "70",
+                # Blank: 70 for tranche one, 30 for tranche two.
+                "default": "",
             },
             {
                 "type": "number",
@@ -63,6 +76,29 @@ CLASS_RULE_PARAM_VALIDATION = [
                 "condition": "INPUT>0",
                 # No default: UMEP plans need 90, and a default would hide a missing value.
                 "default": "",
+            },
+            {
+                "type": "select",
+                "name": "utilization_measure",
+                "label": {"en": "Utilization measure (tranche 2)", "fr": "Mesure de l'utilisation (tranche 2)"},
+                "rights": PAYMENT_PLAN_RIGHTS,
+                "relevance": "True",
+                "optionSet": [
+                    NO_CHOICE,
+                    {"value": "percentage", "label": {"en": "Percentage used", "fr": "Pourcentage utilisé"}},
+                    {"value": "yes_no", "label": {"en": "Used for its purpose: yes or no",
+                                                  "fr": "Utilisé à bon escient : oui ou non"}},
+                ],
+                "default": "null",
+            },
+            {
+                "type": "number",
+                "name": "minimum_utilization_percentage",
+                "label": {"en": "Minimum utilization (%, tranche 2)", "fr": "Utilisation minimale (%, tranche 2)"},
+                "rights": PAYMENT_PLAN_RIGHTS,
+                "relevance": "True",
+                "condition": "INPUT>0",
+                "default": "80",
             },
         ],
     },

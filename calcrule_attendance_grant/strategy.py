@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 
@@ -23,10 +24,14 @@ from calcrule_attendance_grant.grants import (
     GRANT_COMPONENT_IN_KIND,
     GRANT_TYPES,
     IN_KIND_TYPES,
+    CASH,
+    Grant,
     grant_from_record,
+    to_cents,
     resolve_grant,
 )
 from calcrule_attendance_grant.parameters import GRANT_SOURCE_PAYMENT_PLAN, GrantParameters
+from calcrule_attendance_grant.utilization import utilization_shortfall
 
 logger = logging.getLogger(__name__)
 
@@ -55,16 +60,18 @@ class AttendanceGrantStrategy:
 
     @classmethod
     def _calculate(cls, calculation, payment_plan, params, **kwargs):
-        payroll = kwargs.get("payroll")
-        user_id, _start_date, end_date, payment_cycle = \
-            calculation.get_payment_cycle_parameters(**kwargs)
-        user = User.objects.filter(id=user_id).first()
-
         payees = select_payees(
             payment_plan,
             beneficiaries_queryset=kwargs.get("beneficiaries_queryset"),
             enrollments_queryset=kwargs.get("enrollments_queryset"),
         )
+        if params.tranche == 2:
+            return cls._calculate_tranche_two(calculation, payment_plan, params, payees, **kwargs)
+        payroll = kwargs.get("payroll")
+        user_id, _start_date, end_date, payment_cycle = \
+            calculation.get_payment_cycle_parameters(**kwargs)
+        user = User.objects.filter(id=user_id).first()
+
         attendance = evaluate_attendance(
             [payee.beneficiary.id for payee in payees], payment_plan.benefit_plan,
             params.minimum_attendance_percentage,
@@ -146,6 +153,92 @@ class AttendanceGrantStrategy:
         )
         return "Calculation and transformation into bills completed successfully."
 
+    @classmethod
+    def _calculate_tranche_two(cls, calculation, payment_plan, params, payees, **kwargs):
+        """Pay the second tranche, all cash, to beneficiaries whose first tranche is
+        reconciled and whose utilization assessment meets the plan. Attendance, plan
+        approval and grant types are not checked again: tranche one required them, and
+        its recorded grant sizes this share."""
+        payroll = kwargs.get("payroll")
+        user_id, _start_date, end_date, payment_cycle = \
+            calculation.get_payment_cycle_parameters(**kwargs)
+        user = User.objects.filter(id=user_id).first()
+        ids = [payee.beneficiary.id for payee in payees]
+        first = tranche_benefits(payment_plan.benefit_plan_id, 1, ids)
+        second = tranche_benefits(payment_plan.benefit_plan_id, 2, ids)
+
+        paid = 0
+        for payee in payees:
+            beneficiary = payee.beneficiary
+            beneficiary_id = str(beneficiary.id)
+            if second.get(beneficiary_id):
+                cls._log_excluded(payment_plan, payee, "already has a tranche-two benefit that is not rejected")
+                continue
+            if payee.reason:
+                cls._log_excluded(payment_plan, payee, payee.reason, level=logging.WARNING)
+                continue
+            reason, grant = cls._tranche_two_grant(first.get(beneficiary_id), params)
+            if reason is None:
+                reason = utilization_shortfall(
+                    beneficiary.json_ext, params.utilization_measure, params.minimum_utilization_percentage)
+            if reason:
+                cls._log_excluded(payment_plan, payee, reason)
+                continue
+            cls._log_grant_changes(payment_plan, payee, beneficiary.json_ext, grant)
+
+            calculation.run_convert(
+                payment_plan,
+                payee=payee,
+                amount=grant.share,
+                benefit_type=CASH,
+                json_ext=cls._benefit_json_ext(params, grant),
+                user=user,
+                end_date=end_date,
+                payment_cycle=payment_cycle,
+                payroll=payroll,
+            )
+            paid += 1
+
+        logger.info(
+            "Attendance grant, payment plan %s (tranche two): %s of %s participant(s) paid.",
+            payment_plan.code, paid, len(payees),
+        )
+        return "Calculation and transformation into bills completed successfully."
+
+    @staticmethod
+    def _tranche_two_grant(records, params):
+        """(reason, None) when tranche two cannot be paid, else (None, its Grant)."""
+        if not records:
+            return "no tranche-one payment of the programme", None
+        unreconciled = [record for record in records if record.get("_status") != BenefitConsumptionStatus.RECONCILED]
+        if unreconciled:
+            return ("tranche one is not reconciled yet (%s of %s part(s) not RECONCILED)"
+                    % (len(unreconciled), len(records))), None
+        recorded = grant_from_record(records[0])
+        if CASH not in recorded.grant_types:
+            return "a grant without cash was given in full at tranche one", None
+        share = to_cents(recorded.grant_amount * params.tranche_percentage / 100)
+        if share <= 0:
+            return "the tranche-two share of %s rounds to 0" % recorded.grant_amount, None
+        # Tranche two is paid in cash only: the in-kind part was delivered with tranche one.
+        amounts = {grant_type: share if grant_type == CASH else Decimal("0.00") for grant_type in recorded.grant_types}
+        return None, Grant(grant_types=recorded.grant_types, grant_amount=recorded.grant_amount,
+                           percentage=params.tranche_percentage, share=share, amounts=amounts)
+
+    @staticmethod
+    def _log_grant_changes(payment_plan, payee, json_ext, grant):
+        json_ext = json_ext if isinstance(json_ext, dict) else {}
+        current = json_ext.get("approved_grant_amount")
+        changed = current is not None and to_cents(_decimal(current)) != grant.grant_amount
+        types = json_ext.get("grant_types")
+        changed = changed or (isinstance(types, list) and set(types) != set(grant.grant_types))
+        if changed:
+            logger.warning(
+                "Attendance grant, payment plan %s: %s: the grant details changed since tranche one; "
+                "tranche two is paid from the grant recorded then (%s, %s).",
+                payment_plan.code, payee.label, grant.grant_amount, "+".join(grant.grant_types),
+            )
+
     @staticmethod
     def _benefit_json_ext(params, grant):
         """What the BenefitConsumption records about its tranche.
@@ -168,7 +261,7 @@ class AttendanceGrantStrategy:
             }
         return {
             "attendance_grant": {
-                "tranche": 1,
+                "tranche": params.tranche,
                 "grant_component": params.grant_component,
                 "grant_types": list(grant.grant_types),
                 "grant_amount": float(grant.grant_amount),
@@ -182,11 +275,11 @@ class AttendanceGrantStrategy:
     @staticmethod
     def _check_tranche_percentage(payment_plan, params):
         """A tranche's cash and in-kind plans must use the same tranche percentage, or
-        their parts would not add up to one share. Every plan is a tranche-one plan
-        until tranche two is supported."""
+        their parts would not add up to one share."""
         others = [
             plan for plan in _attendance_grant_plans(payment_plan)
-            if plan.id != payment_plan.id and _plan_tranche_percentage(plan) != params.tranche_percentage
+            if plan.id != payment_plan.id and GrantParameters.tranche_of(_plan_rule(plan)) == params.tranche
+            and _plan_tranche_percentage(plan) != params.tranche_percentage
         ]
         if others:
             raise AttendanceGrantConfigurationError(
@@ -285,12 +378,18 @@ class AttendanceGrantStrategy:
 
 
 def tranche_one_benefits(benefit_plan_id, beneficiary_ids=None):
-    """{beneficiary ID (Bill subject): [recorded tranche]} for the programme's tranche-one
-    attendance-grant benefits that were not rejected or deleted, optionally only for
-    ``beneficiary_ids``.
+    """tranche_benefits for tranche one."""
+    return tranche_benefits(benefit_plan_id, 1, beneficiary_ids)
 
-    Each benefit records its own part and tranche (``attendance_grant``), so they are
-    found under any payment plan of the programme, including a deleted or changed one.
+
+def tranche_benefits(benefit_plan_id, tranche, beneficiary_ids=None):
+    """{beneficiary ID (Bill subject): [recorded tranche]} for the programme's attendance-grant
+    benefits of ``tranche`` that were not rejected or deleted, optionally only for
+    ``beneficiary_ids``. Each record is the benefit's ``attendance_grant`` block with its
+    status as ``_status``.
+
+    Each benefit records its own part and tranche, so they are found under any payment
+    plan of the programme, including a deleted or changed one.
     """
     attachments = BenefitAttachment.objects.filter(
         is_deleted=False,
@@ -298,15 +397,16 @@ def tranche_one_benefits(benefit_plan_id, beneficiary_ids=None):
         benefit__payrollbenefitconsumption__is_deleted=False,
         benefit__payrollbenefitconsumption__payroll__is_deleted=False,
         benefit__payrollbenefitconsumption__payroll__payment_plan__benefit_plan_id=benefit_plan_id,
-        benefit__json_ext__attendance_grant__tranche=1,
+        benefit__json_ext__attendance_grant__tranche=tranche,
     ).exclude(benefit__status=BenefitConsumptionStatus.REJECTED)
     if beneficiary_ids is not None:
         attachments = attachments.filter(bill__subject_id__in=[str(beneficiary_id) for beneficiary_id in beneficiary_ids])
     records = {}
-    for subject_id, json_ext in attachments.values_list("bill__subject_id", "benefit__json_ext").distinct():
+    for subject_id, json_ext, status in attachments.values_list(
+            "bill__subject_id", "benefit__json_ext", "benefit__status").distinct():
         record = (json_ext or {}).get("attendance_grant")
         if isinstance(record, dict):
-            records.setdefault(str(subject_id), []).append(record)
+            records.setdefault(str(subject_id), []).append({**record, "_status": status})
     return records
 
 
@@ -335,3 +435,10 @@ def _format(value):
 
 def _plan_component(payment_plan):
     return _plan_rule(payment_plan).get("grant_component")
+
+
+def _decimal(value):
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return Decimal("-1")

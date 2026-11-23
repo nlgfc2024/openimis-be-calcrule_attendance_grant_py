@@ -15,8 +15,15 @@ GRANT_SOURCE_PAYMENT_PLAN = "payment_plan"
 GRANT_SOURCE_BENEFICIARY_JSON = "beneficiary_json"
 GRANT_SOURCES = (GRANT_SOURCE_PAYMENT_PLAN, GRANT_SOURCE_BENEFICIARY_JSON)
 
-DEFAULT_TRANCHE_PERCENTAGE = Decimal("70")
+# Each tranche's share of a grant that includes cash, unless the plan sets its own.
+DEFAULT_TRANCHE_PERCENTAGES = {1: Decimal("70"), 2: Decimal("30")}
+DEFAULT_TRANCHE_PERCENTAGE = DEFAULT_TRANCHE_PERCENTAGES[1]
 DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE = Decimal("80")
+DEFAULT_MINIMUM_UTILIZATION_PERCENTAGE = Decimal("80")
+TRANCHES = (1, 2)
+UTILIZATION_PERCENTAGE = "percentage"
+UTILIZATION_YES_NO = "yes_no"
+UTILIZATION_MEASURES = (UTILIZATION_PERCENTAGE, UTILIZATION_YES_NO)
 
 
 def _is_blank(value):
@@ -45,6 +52,11 @@ class GrantParameters:
     minimum_attendance_percentage: Decimal
     # Settings of the programme (BenefitPlan) the plan pays.
     programme: ProgrammeSettings = ProgrammeSettings()
+    # 1 or 2. Tranche two is paid in cash, once the first tranche is reconciled and
+    # the beneficiary's utilization assessment meets the plan.
+    tranche: int = 1
+    utilization_measure: str = None
+    minimum_utilization_percentage: Decimal = DEFAULT_MINIMUM_UTILIZATION_PERCENTAGE
 
     @classmethod
     def from_payment_plan(cls, payment_plan):
@@ -57,25 +69,29 @@ class GrantParameters:
         rule = json_ext.get("calculation_rule")
         rule = rule if isinstance(rule, dict) else {}
 
-        if any(not _is_blank(rule.get(key)) for key in (
-                "requires_reconciled_payment_plan_ids", "requires_reconciled_payment_plan_id")):
-            errors.append(
-                "second-tranche plans (requires_reconciled_payment_plan_ids) are not "
-                "supported yet"
-            )
+        tranche = cls.tranche_of(rule, errors)
 
         component = None if _is_blank(rule.get("grant_component")) else rule.get("grant_component")
         if component not in GRANT_COMPONENTS:
             errors.append("grant_component must be one of %s" % ", ".join(GRANT_COMPONENTS))
+        elif tranche == 2 and component == GRANT_COMPONENT_IN_KIND:
+            errors.append("tranche two is paid in cash only, so its plans need grant_component cash")
+
+        utilization_measure = None if _is_blank(rule.get("utilization_measure")) else rule.get("utilization_measure")
+        if tranche == 2 and utilization_measure not in UTILIZATION_MEASURES:
+            errors.append("a tranche-two plan needs utilization_measure, one of %s" % ", ".join(UTILIZATION_MEASURES))
+        minimum_utilization = cls._percentage(rule, "minimum_utilization_percentage",
+                                              DEFAULT_MINIMUM_UTILIZATION_PERCENTAGE, errors)
 
         source = None if _is_blank(rule.get("grant_amount_source")) else rule.get("grant_amount_source")
-        if source not in GRANT_SOURCES:
+        # Tranche two pays against the grant recorded with tranche one, so it needs no source.
+        if tranche == 1 and source not in GRANT_SOURCES:
             errors.append(
                 "grant_amount_source must be one of %s" % ", ".join(GRANT_SOURCES)
             )
 
         grant_amount = None
-        if source == GRANT_SOURCE_PAYMENT_PLAN:
+        if tranche == 1 and source == GRANT_SOURCE_PAYMENT_PLAN:
             grant_amount = _parse_decimal(rule.get("grant_amount"))
             if grant_amount is None or grant_amount <= 0:
                 errors.append(
@@ -84,12 +100,14 @@ class GrantParameters:
                 )
 
         tranche_percentage = cls._percentage(
-            rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGE, errors
+            rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGES[tranche], errors
         )
         # The modules come from each beneficiary's training, a tick always means
         # attended, and the programme decides which training status counts.
         programme = ProgrammeSettings.from_benefit_plan(payment_plan.benefit_plan, errors)
-        minimum_attendance = cls._minimum_attendance(rule, programme, errors)
+        # Tranche two checks no attendance: tranche one already required it.
+        minimum_attendance = cls._minimum_attendance(rule, programme, errors) if tranche == 1 \
+            else DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE
         if component == GRANT_COMPONENT_IN_KIND and programme.allowed_grant_types and not any(
                 grant_type in programme.allowed_grant_types for grant_type in IN_KIND_TYPES):
             errors.append("an in_kind plan needs a programme that allows EQUIPMENT or SERVICE")
@@ -106,12 +124,28 @@ class GrantParameters:
             tranche_percentage=tranche_percentage,
             minimum_attendance_percentage=minimum_attendance,
             programme=programme,
+            tranche=tranche,
+            utilization_measure=utilization_measure,
+            minimum_utilization_percentage=minimum_utilization,
         )
 
     @classmethod
+    def tranche_of(cls, rule, errors=None):
+        """The tranche a plan pays, 1 when unset (the form stores choices as text or numbers)."""
+        value = rule.get("tranche")
+        if _is_blank(value):
+            return 1
+        number = _parse_decimal(value)
+        if number is None or number not in TRANCHES:
+            if errors is not None:
+                errors.append("tranche must be 1 or 2")
+            return 1
+        return int(number)
+
+    @classmethod
     def tranche_percentage_of(cls, rule):
-        """A plan's tranche percentage, the default when unset or invalid."""
-        return cls._percentage(rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGE, [])
+        """A plan's tranche percentage, its tranche's default when unset or invalid."""
+        return cls._percentage(rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGES[cls.tranche_of(rule)], [])
 
     @classmethod
     def _minimum_attendance(cls, rule, programme, errors):
