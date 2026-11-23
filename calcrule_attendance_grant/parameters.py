@@ -109,6 +109,11 @@ class GrantParameters:
         )
 
     @classmethod
+    def tranche_percentage_of(cls, rule):
+        """A plan's tranche percentage, the default when unset or invalid."""
+        return cls._percentage(rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGE, [])
+
+    @classmethod
     def _minimum_attendance(cls, rule, programme, errors):
         """The plan's attendance minimum. A programme that disqualifies participants
         below a percentage (UMEP) needs it set, at least that high, so a plan saved
