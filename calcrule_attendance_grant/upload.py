@@ -26,7 +26,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from calcrule_attendance_grant.apps import CalcruleAttendanceGrantConfig
-from calcrule_attendance_grant.grants import CASH, GRANT_TYPES, tranche_amount_key
+from calcrule_attendance_grant.grants import GRANT_TYPES, tranche_amount_key
 from calcrule_attendance_grant.plan_approval import (
     FROZEN_ONCE_PAID_KEYS,
     PlanApprovalService,
@@ -207,6 +207,12 @@ class GrantUtilizationUpload:
                 "The plan status and approval are recorded when a plan approval is decided, not uploaded. "
                 "Remove the columns: %s." % ", ".join(decisions)
             )
+        tranche_two = sorted(column for column in columns if column.startswith("tranche_2_"))
+        if tranche_two:
+            raise GrantUploadError(
+                "Tranche two is paid in cash, as its payment plan's share of the grant, so its amounts are not "
+                "uploaded. Remove the columns: %s." % ", ".join(tranche_two)
+            )
         unknown = sorted(columns - {ID_COLUMN} - set(GRANT_KEYS) - set(UTILIZATION_KEYS))
         if unknown:
             raise GrantUploadError(
@@ -316,13 +322,10 @@ class GrantUtilizationUpload:
         types = merged.get("grant_types")
         if not isinstance(types, list) or not types:
             types = list(programme.allowed_grant_types) if len(programme.allowed_grant_types) == 1 else []
-        for tranche in (1, 2):
-            for grant_type in GRANT_TYPES:
-                key = tranche_amount_key(tranche, grant_type)
-                if key in patch and patch[key] and grant_type not in types:
-                    error(key, "is not zero but %s is not one of the grant types" % grant_type)
-                if tranche == 2 and key in patch and patch[key] and CASH not in types:
-                    error(key, "a grant without cash has no second tranche")
+        for grant_type in GRANT_TYPES:
+            key = tranche_amount_key(1, grant_type)
+            if key in patch and patch[key] and grant_type not in types:
+                error(key, "is not zero but %s is not one of the grant types" % grant_type)
 
     # Saving
 

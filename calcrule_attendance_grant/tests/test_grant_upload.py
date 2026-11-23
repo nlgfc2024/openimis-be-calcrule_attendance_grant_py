@@ -206,17 +206,20 @@ class GrantUploadTest(TestCase):
 
     def test_rows_are_checked(self):
         upload, summary = self.upload(
-            {"ID": str(self.beneficiary.id), "grant_types": "EQUIPMENT", "tranche_1_cash_amount": 100,
-             "tranche_2_equipment_amount": 100},
+            {"ID": str(self.beneficiary.id), "grant_types": "EQUIPMENT", "tranche_1_cash_amount": 100},
             {"ID": str(self.other.id), "tranche_1_cash_amount": -1, "grant_types": "CASH;SERVICE"},
         )
         self.assertEqual((upload.status, summary["invalid"]), ("FAIL", 2))
         errors = row_errors(upload)
         self.assertEqual({error["note"] for error in errors[str(self.beneficiary.id)]}, {
-            "is not zero but CASH is not one of the grant types", "a grant without cash has no second tranche",
+            "is not zero but CASH is not one of the grant types",
         })
         self.assertEqual({error["field_name"] for error in errors[str(self.other.id)]},
                          {"tranche_1_cash_amount", "grant_types"})
+
+    def test_tranche_two_amounts_are_not_uploaded(self):
+        with self.assertRaisesMessage(PythonWorkflowHandlerException, "Remove the columns: tranche_2_cash_amount"):
+            self.upload({"ID": str(self.beneficiary.id), "tranche_2_cash_amount": 300})
 
     def test_a_row_without_grant_details_is_reported(self):
         upload, _ = self.upload({"ID": str(self.beneficiary.id), "approved_grant_amount": " "},
