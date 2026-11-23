@@ -117,32 +117,57 @@ reconciliation file: the in-kind amounts for the PIU team on an `in_kind` plan.
 
 The keys that size and release the grant payments sit on the beneficiary's
 `json_ext` (`GroupBeneficiary` for UPG and RMEP, `Beneficiary` for UMEP). The
-beneficiary forms render every `json_ext` key as an editable field, so the module
-restricts them to roles holding the matching right:
+beneficiary forms render every `json_ext` key as an editable field, and the update
+mutations accept the whole `json_ext`, so the module protects them:
 
-| Right | Code | Protected keys |
-|---|---|---|
-| Manage beneficiary plans and grants | `210001` | `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference`, `business_plan_status`, `plan_approved_on`, `plan_approved_by` |
-| Record utilization assessments | `210002` | `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` |
+| Keys | How they change |
+|---|---|
+| Grant: `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference` | Only through a plan approval (below): submitted with right `210001`. |
+| Decision: `business_plan_status`, `plan_approved_on`, `plan_approved_by`, `plan_approved_by_id`, `plan_rejection_reason` | Only through a plan approval: recorded when a user with right `210003` decides. |
+| Utilization: `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` | Saved directly by users with right `210002`. A result needs `utilization_assessed_on` and `utilization_assessed_by`. |
 
 Before-hooks on `beneficiary_service.create` / `update` and
-`group_beneficiary_service.create` / `update` reject setting, changing or removing
-a protected key by a user without its right. Unchanged values pass, so other fields
-can still be saved. An `APPROVED` `business_plan_status` needs `plan_approved_on`
-and `plan_approved_by`, and a utilization result needs `utilization_assessed_on`
-and `utilization_assessed_by`. IMIS administrators hold every right.
+`group_beneficiary_service.create` / `update` reject any other change to these keys,
+including by administrators, and generic beneficiary update tasks cannot carry
+grant or decision keys. Unchanged values pass, so other fields can still be saved;
+values are compared by meaning, so `700`, `700.0` and `"700"` are the same. With
+maker-checker, a utilization change is checked when the update task is created and
+again when each approver approves it; rejecting a generic task needs no right.
 
-With maker-checker, the maker needs the right to create the update task
-(`task_service.create`), and each approver needs it to approve the task
-(`task_service.resolve_task`), so an approval they may not give fails with a clear
-error. The approved task then runs as the approver and is checked again. Rejecting
-a task needs no right.
+### Plan approval
+
+Plan approval uses the CoreMIS maker-checker tasks:
+
+1. A user with `210001` submits a beneficiary's grant keys with the
+   `submitBeneficiaryPlan` mutation (`id`, `isGroup`, `jsonExt`). The proposal is
+   checked (grant types the programme allows; amounts as numbers, at most two
+   decimals, the grant above 0) and becomes a task with source and business event
+   `calcrule_attendance_grant.plan_approval`, holding the proposed values. The
+   beneficiary does not change yet, and only one approval can be open per beneficiary.
+2. The task goes to the task group whose `task_sources` include
+   `calcrule_attendance_grant.plan_approval`. Its executors approve or reject it with
+   the standard task resolution, under the group's completion policy. Deciding needs
+   right `210003` and a place among the group's executors; IMIS administrators may
+   decide any approval. A rejection needs a reason, given as the resolution's
+   `additional_data` (`{"reason": "..."}`).
+3. When the task completes, the proposed values are saved with
+   `business_plan_status = APPROVED`, and the user who completed it is recorded as
+   `plan_approved_by` (name), `plan_approved_by_id` and `plan_approved_on` (today).
+   When it fails, the proposal is dropped, `business_plan_status = REJECTED` and the
+   reason is recorded as `plan_rejection_reason`.
+
+Who may submit and who may decide is set by roles and task groups, as elsewhere in
+CoreMIS: an administrator can let one user do both, or give the decision to others.
 
 The generic "Python Beneficiaries Update" upload writes `json_ext` in SQL, so these
-hooks do not see it; do not use it for protected columns.
+hooks do not see it. It only writes keys declared in the programme's
+`beneficiary_data_schema`, so do not declare the grant and decision keys there.
 
-**Deployment:** assign `210001` to the roles that enter grant amounts and approve
-plans, and `210002` to the roles that record utilization assessments.
+**Deployment:** assign `210001` to the roles that enter grant details, `210003` to
+the roles that approve business plans, and `210002` to the roles that record
+utilization assessments. Create a task group with
+`{"task_sources": ["calcrule_attendance_grant.plan_approval"]}` and add the approvers
+as its executors.
 
 ## Grant and utilization upload
 
@@ -212,5 +237,6 @@ Module settings (`ModuleConfiguration` for `calcrule_attendance_grant`):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `gql_plans_and_grants_perms` | `["210001"]` | Right to change the plan and grant keys. |
+| `gql_plans_and_grants_perms` | `["210001"]` | Right to submit grant details for approval. |
 | `gql_utilization_assessment_perms` | `["210002"]` | Right to change the utilization keys. |
+| `gql_plan_approval_perms` | `["210003"]` | Right to approve or reject submitted business plans. |

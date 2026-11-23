@@ -6,11 +6,14 @@ from django.apps import AppConfig
 MODULE_NAME = "calcrule_attendance_grant"
 
 DEFAULT_CFG = {
-    # Right to set or change a beneficiary's grant types and amounts, per-tranche
-    # amounts, and plan approval.
+    # Right to submit a beneficiary's grant types, amounts and business plan
+    # reference for approval.
     "gql_plans_and_grants_perms": ["210001"],
     # Right to set or change a beneficiary's utilization assessment.
     "gql_utilization_assessment_perms": ["210002"],
+    # Right to approve or reject a submitted business plan (plan status, approval
+    # date, approver and rejection reason).
+    "gql_plan_approval_perms": ["210003"],
 }
 
 
@@ -31,6 +34,7 @@ class CalcruleAttendanceGrantConfig(AppConfig):
 
     gql_plans_and_grants_perms = DEFAULT_CFG["gql_plans_and_grants_perms"]
     gql_utilization_assessment_perms = DEFAULT_CFG["gql_utilization_assessment_perms"]
+    gql_plan_approval_perms = DEFAULT_CFG["gql_plan_approval_perms"]
 
     def ready(self):
         from core.models import ModuleConfiguration
