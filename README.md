@@ -92,14 +92,35 @@ The tranche share S is `A x tranche_percentage` when the grant includes `CASH`, 
 delivers, `tranche_1_equipment_amount` and `tranche_1_service_amount`, for its grant
 types. The cash part is the rest of S, so a different `tranche_percentage` on the
 PaymentPlan changes only the cash; in-kind amounts above S exclude the beneficiary.
-A recorded `tranche_<n>_cash_amount` is used as given, and then the amounts must add
-up to S. A cash-only grant records nothing, and tranche two is S in cash unless it
-records in-kind amounts. A grant without cash has no cash part, so its in-kind
-amounts must add up to A.
+A recorded `tranche_1_cash_amount` is used as given, and then the amounts must add
+up to S. A cash-only grant records nothing. A grant without cash has no cash part,
+so its in-kind amounts must add up to A. Tranche two is always cash (see Tranche two).
 A `cash` plan pays the cash amount, and an `in_kind` plan pays the equipment and
 service amounts, so a beneficiary with both is in both payrolls and the two add up
 to S. Amounts must be JSON numbers; text, missing or inconsistent amounts exclude
 the beneficiary.
+
+### Tranche two
+
+A plan with `tranche` 2 pays the rest of a grant with cash, in cash only. It finds the
+beneficiary's tranche-one payments from what each benefit recorded, under any payment
+plan of the programme, and pays the beneficiary when all of the following hold:
+
+1. **Tranche one is reconciled.** The beneficiary has at least one tranche-one
+   benefit, and every one that was not rejected or deleted is RECONCILED: the cash was
+   paid and the equipment or service delivered.
+2. **The grant includes cash.** A grant without cash was given in full at tranche
+   one, so the beneficiary is skipped.
+3. **The utilization assessment meets the plan.** `utilization_assessed_on` is set,
+   and `utilization_percentage` is at least `minimum_utilization_percentage` (a value
+   exactly at the minimum is eligible) for the `percentage` measure, or
+   `utilization_confirmed` is `YES` for `yes_no`.
+4. **No earlier tranche-two benefit**, other than a rejected or deleted one.
+
+Attendance, plan approval and grant types are not checked again. The share is
+`A x tranche_percentage`, with A and the grant types recorded on the tranche-one
+benefit, not the beneficiary's current values; a difference is logged. The benefit
+records `tranche` 2 in its `attendance_grant` block.
 
 ### What is recorded
 
@@ -241,7 +262,8 @@ Every file:
 
 - needs an `ID` column: the GroupBeneficiary ID for UPG and RMEP, the Beneficiary ID
   for UMEP. Any other column must be a grant or utilization key. Plan status and
-  approval columns are refused (the approval records them), as are unknown columns
+  approval columns are refused (the approval records them), as are tranche-two amount
+  columns (tranche two is paid in cash as its plan's share), as are unknown columns
   and files that mix grant and utilization columns; a refused file changes nothing.
 - needs access to the programme and the right for its columns: `210001` for grant
   details, `210002` for utilization, or the whole upload is refused.
@@ -254,10 +276,9 @@ Every file:
   `utilization_percentage` is from 0 to 100; dates are `YYYY-MM-DD` or spreadsheet
   dates; a utilization result has its date and author.
 - reads `grant_types` as a semicolon-separated list such as `CASH;EQUIPMENT`, limited
-  to the programme's `allowed_grant_types` and stored as a JSON list. A per-tranche
-  amount can be non-zero only for a recorded grant type, and a grant without cash has
-  no tranche-two amounts. Whether a tranche adds up to its share is checked by the
-  payroll, against the payment plan's percentage.
+  to the programme's `allowed_grant_types` and stored as a JSON list. A tranche-one
+  amount can be non-zero only for a recorded grant type. Whether a tranche adds up to
+  its share is checked by the payroll, against the payment plan's percentage.
 - merges only the submitted keys, as numbers where they are numbers. A blank cell is
   not submitted, so an upload never clears a value.
 
@@ -277,13 +298,18 @@ empty choice (`null`) counts as not set.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `grant_component` | required | `cash` or `in_kind`: the part of each tranche this plan pays. |
+| `tranche` | `1` | `1` or `2`: the tranche this plan pays. |
+| `grant_component` | required | `cash` or `in_kind`: the part of each tranche this plan pays. Tranche two is `cash` only. |
 | `grant_amount_source` | required | `payment_plan` or `beneficiary_json`. |
 | `grant_amount` | required for `payment_plan` | Programme-wide grant amount. |
-| `tranche_percentage` | `70` | The tranche's share of A for grants that include cash. A tranche's cash and in-kind plans must use the same value: a plan whose value differs from another attendance-grant plan of the programme stops with a configuration error. |
+| `tranche_percentage` | `70` for tranche one, `30` for tranche two | The tranche's share of A for grants that include cash. A tranche's cash and in-kind plans must use the same value: a plan whose value differs from another attendance-grant plan of the programme for the same tranche stops with a configuration error. |
 | `minimum_attendance_percentage` | `80`; required, and at least `training_disqualification_percentage`, for a programme that sets it (UMEP: 90) | Completion each module needs. |
 
-Second-tranche plans (`requires_reconciled_payment_plan_ids`) are refused for now.
+| `utilization_measure` | required for tranche two | `percentage` (UPG, RMEP) or `yes_no` (UMEP): how the beneficiary's utilization assessment releases tranche two. |
+| `minimum_utilization_percentage` | `80` | The share of tranche one that must have been used for its purpose, for the `percentage` measure. |
+
+`grant_amount_source` and `grant_amount` apply to tranche one only: tranche two pays
+against the grant recorded with tranche one.
 
 Programme settings, on `BenefitPlan.json_ext`:
 
