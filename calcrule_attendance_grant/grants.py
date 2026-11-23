@@ -99,6 +99,20 @@ def resolve_grant(json_ext, *, allowed_grant_types, grant_amount_source_is_plan,
     )
 
 
+def grant_from_record(record):
+    """The tranche a BenefitConsumption recorded (its ``attendance_grant`` block), so the
+    other part of the tranche is paid from exactly the same share and split."""
+    grant_types = tuple(grant_type for grant_type in GRANT_TYPES if grant_type in (record.get("grant_types") or []))
+    return Grant(
+        grant_types=grant_types,
+        grant_amount=to_cents(Decimal(str(record.get("grant_amount", 0)))),
+        percentage=Decimal(str(record.get("tranche_percentage", 0))),
+        share=to_cents(Decimal(str(record.get("tranche_share", 0)))),
+        amounts={grant_type: to_cents(Decimal(str(record.get("%s_amount" % grant_type.lower(), 0))))
+                 for grant_type in grant_types},
+    )
+
+
 def _missing_in_kind_notes(json_ext, grant_types, tranche):
     """Tranche one delivers the in-kind part, so an in-kind grant type without an amount
     there, counted as 0 because other amounts are recorded, is more likely a slip."""
