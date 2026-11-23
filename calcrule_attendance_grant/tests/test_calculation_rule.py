@@ -185,10 +185,10 @@ class UpgCashGrantTest(AttendanceGrantRunMixin, TestCase):
     def test_the_rule_declares_its_payment_plan_parameters(self):
         parameters = AttendanceGrantCalculationRule.get_parameters(None, "PaymentPlan", self.payment_plan())
         self.assertEqual([parameter["name"] for parameter in parameters], [
-            "grant_component", "grant_amount_source", "grant_amount", "tranche_percentage",
-            "minimum_attendance_percentage",
+            "tranche", "grant_component", "grant_amount_source", "grant_amount", "tranche_percentage",
+            "minimum_attendance_percentage", "utilization_measure", "minimum_utilization_percentage",
         ])
-        self.assertEqual([option["value"] for option in parameters[0]["optionSet"]], ["null", "cash", "in_kind"])
+        self.assertEqual([option["value"] for option in parameters[1]["optionSet"]], ["null", "cash", "in_kind"])
 
     def test_the_payroll_selection_narrows_who_is_paid(self):
         payroll = self.run_payroll(
@@ -313,3 +313,102 @@ class RmepCashAndInKindGrantTest(AttendanceGrantRunMixin, TestCase):
                 self.assertIn(f"{participants[name].id} (individual {participants[name].individual_id}) "
                               f"not paid: {reason}", output)
         self.assertFalse(BenefitConsumption.objects.filter(amount__lte=0).exists())
+
+
+class TrancheTwoTest(AttendanceGrantRunMixin, TestCase):
+    """Tranche two pays the rest of a grant with cash once tranche one is reconciled."""
+    default_rule = {"grant_component": "cash", "grant_amount_source": "beneficiary_json"}
+    ASSESSED = {"utilization_assessed_on": "2026-12-01", "utilization_assessed_by": "Officer"}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.set_up_programme('AGT2', ["CASH", "EQUIPMENT"])
+        cls.mixed = cls.participant('Mixed', {
+            "grant_types": ["CASH", "EQUIPMENT"], "approved_grant_amount": 1000, "tranche_1_equipment_amount": 500})
+        cls.equipment_only = cls.participant('EquipmentOnly', {
+            "grant_types": ["EQUIPMENT"], "approved_grant_amount": 800, "tranche_1_equipment_amount": 800})
+
+    def pay_tranche_one(self, reconcile=True):
+        self.run_payroll(self.payment_plan())
+        self.run_payroll(self.payment_plan(grant_component="in_kind"))
+        if reconcile:
+            BenefitConsumption.objects.filter(
+                individual__in=[self.mixed.individual, self.equipment_only.individual],
+            ).update(status=BenefitConsumptionStatus.RECONCILED)
+
+    def assess(self, beneficiary, **values):
+        Beneficiary.objects.filter(id=beneficiary.id).update(
+            json_ext={**Beneficiary.objects.get(id=beneficiary.id).json_ext, **values})
+
+    def tranche_two(self, **rule):
+        return self.payment_plan(**{"tranche": "2", "utilization_measure": "percentage", **rule})
+
+    def run_tranche_two(self, **rule):
+        with self.assertLogs(STRATEGY_LOGGER, level="INFO") as logs:
+            payroll = self.run_payroll(self.tranche_two(**rule))
+        return payroll, "\n".join(logs.output)
+
+    def test_the_rest_of_a_grant_with_cash_is_paid_once_tranche_one_is_reconciled(self):
+        self.pay_tranche_one()
+        self.assess(self.mixed, utilization_percentage=80, **self.ASSESSED)
+        payroll, output = self.run_tranche_two()
+        benefit = self.benefits(payroll).get()
+        self.assertEqual((benefit.individual_id, benefit.amount, benefit.type),
+                         (self.mixed.individual_id, Decimal("300.00"), "CASH"))
+        self.assertEqual(benefit.json_ext["attendance_grant"]["tranche"], 2)
+        self.assertEqual(benefit.json_ext["attendance_grant"]["cash_amount"], 300.0)
+        self.assertIn("a grant without cash was given in full at tranche one", output)
+
+    def test_tranche_one_must_be_reconciled_in_every_part(self):
+        self.pay_tranche_one(reconcile=False)
+        BenefitConsumption.objects.filter(individual=self.mixed.individual, type="CASH").update(
+            status=BenefitConsumptionStatus.RECONCILED)
+        self.assess(self.mixed, utilization_percentage=90, **self.ASSESSED)
+        payroll, output = self.run_tranche_two()
+        self.assertFalse(self.benefits(payroll).exists())
+        self.assertIn("tranche one is not reconciled yet (1 of 2 part(s) not RECONCILED)", output)
+
+    def test_the_utilization_assessment_must_meet_the_plan(self):
+        self.pay_tranche_one()
+        cases = {
+            "utilization not assessed (no utilization_assessed_on)": {"utilization_percentage": 90},
+            "utilization 65% below 80%": {"utilization_percentage": 65, **self.ASSESSED},
+            "utilization_percentage must be a number, got '90'": {"utilization_percentage": "90", **self.ASSESSED},
+        }
+        for reason, values in cases.items():
+            with self.subTest(reason=reason):
+                Beneficiary.objects.filter(id=self.mixed.id).update(json_ext={
+                    key: value for key, value in Beneficiary.objects.get(id=self.mixed.id).json_ext.items()
+                    if not key.startswith("utilization_")})
+                self.assess(self.mixed, **values)
+                payroll, output = self.run_tranche_two()
+                self.assertFalse(self.benefits(payroll).exists())
+                self.assertIn(reason, output)
+
+    def test_a_yes_no_programme_needs_a_confirmed_use(self):
+        self.pay_tranche_one()
+        self.assess(self.mixed, utilization_confirmed="NO", **self.ASSESSED)
+        payroll, output = self.run_tranche_two(utilization_measure="yes_no")
+        self.assertFalse(self.benefits(payroll).exists())
+        self.assertIn("utilization not confirmed (utilization_confirmed is 'NO')", output)
+        self.assess(self.mixed, utilization_confirmed="YES")
+        payroll, _ = self.run_tranche_two(utilization_measure="yes_no")
+        self.assertEqual(self.benefits(payroll).get().amount, Decimal("300.00"))
+
+    def test_tranche_two_is_paid_once_from_the_grant_recorded_with_tranche_one(self):
+        self.pay_tranche_one()
+        self.assess(self.mixed, utilization_percentage=100, **self.ASSESSED)
+        Beneficiary.objects.filter(id=self.mixed.id).update(json_ext={
+            **Beneficiary.objects.get(id=self.mixed.id).json_ext, "approved_grant_amount": 2000})
+        payroll, output = self.run_tranche_two()
+        self.assertEqual(self.benefits(payroll).get().amount, Decimal("300.00"))
+        self.assertIn("the grant details changed since tranche one", output)
+        second, output = self.run_tranche_two()
+        self.assertFalse(self.benefits(second).exists())
+        self.assertIn("already has a tranche-two benefit that is not rejected", output)
+
+    def test_nobody_is_paid_tranche_two_without_tranche_one(self):
+        self.assess(self.mixed, utilization_percentage=100, **self.ASSESSED)
+        payroll, output = self.run_tranche_two()
+        self.assertFalse(self.benefits(payroll).exists())
+        self.assertIn("no tranche-one payment of the programme", output)
