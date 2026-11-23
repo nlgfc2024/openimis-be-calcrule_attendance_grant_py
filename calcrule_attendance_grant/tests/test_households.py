@@ -1,6 +1,8 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.test import TestCase
+from payroll.apps import PayrollConfig
 
 from invoice.models import Bill
 from project_social_protection.models import GroupBeneficiaryProjectEnrollment
@@ -23,6 +25,7 @@ RMEP_GRANT = {
 }
 
 
+@patch.object(PayrollConfig, "group_benefit_payee", "PRIMARY_WORKER", create=True)
 class HouseholdGrantTest(AttendanceGrantRunMixin, TestCase):
     """UPG and RMEP are GROUP programmes paid to each household's primary worker."""
     default_rule = {"grant_component": "cash", "grant_amount_source": "beneficiary_json"}
@@ -61,7 +64,7 @@ class HouseholdGrantTest(AttendanceGrantRunMixin, TestCase):
         self.assertFalse(self.benefits(second).exists())
         self.assertIn(
             f"household beneficiary {self.household.id} (primary worker {self.primary_worker.individual_id}) "
-            "not paid: already has a benefit under this payment plan that is not rejected",
+            "not paid: already has a cash benefit for this tranche that is not rejected",
             "\n".join(logs.output),
         )
 
@@ -96,6 +99,14 @@ class HouseholdGrantTest(AttendanceGrantRunMixin, TestCase):
             self.run_payroll(self.payment_plan(), enrollments_queryset=self.household_enrollments())
         self.assertIn(f"household beneficiary {short.id}", "\n".join(logs.output))
         self.assertIn("module 'AGHH module 2': attended 2 of 5 topics (40.0%), below 80%", "\n".join(logs.output))
+
+    def test_households_are_not_paid_while_the_payroll_pays_the_primary_recipient(self):
+        # Inside the test: a method-level patch would be undone by the class-level one.
+        with patch.object(PayrollConfig, "group_benefit_payee", "PRIMARY_RECIPIENT", create=True):
+            with self.assertRaisesMessage(AttendanceGrantConfigurationError,
+                                          "group_benefit_payee is 'PRIMARY_RECIPIENT'"):
+                self.run_payroll(self.payment_plan(), enrollments_queryset=self.household_enrollments())
+        self.assertFalse(Bill.objects.filter(subject_id=str(self.household.id)).exists())
 
     def test_an_enrollment_selection_of_another_model_is_a_configuration_error(self):
         with self.assertRaisesMessage(AttendanceGrantConfigurationError,

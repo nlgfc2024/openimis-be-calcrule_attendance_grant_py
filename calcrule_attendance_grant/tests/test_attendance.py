@@ -67,6 +67,13 @@ class EvaluateAttendanceTest(TestCase):
         result = self.evaluate(self.participant('NotEnrolled'))
         self.assertEqual(result.reason, "not enrolled in a training of the programme")
 
+    def test_a_training_without_topics_is_named_in_the_shortfall(self):
+        beneficiary = self.participant('NoTopics')
+        empty = create_training(self.user, self.benefit_plan, [], 'Training without topics')
+        attend(self.user, beneficiary, empty, 0)
+        self.assertEqual(self.evaluate(beneficiary).reason,
+                         "enrolled in 'Training without topics', whose attendance sheet has no topics yet")
+
     def test_training_status_does_not_matter_by_default(self):
         beneficiary = self.participant('InProgress')
         running = create_training(

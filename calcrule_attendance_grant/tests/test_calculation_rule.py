@@ -45,7 +45,8 @@ class AttendanceGrantRegistrationTest(TestCase):
         )
 
 
-APPROVED = {"business_plan_status": "APPROVED", "plan_approved_on": "2026-10-01", "plan_approved_by": "Committee"}
+APPROVED = {"business_plan_status": "APPROVED", "plan_approved_on": "2026-10-01", "plan_approved_by": "Committee",
+            "plan_approved_by_id": "approver"}
 
 
 class AttendanceGrantRunMixin:
@@ -158,7 +159,7 @@ class UpgCashGrantTest(AttendanceGrantRunMixin, TestCase):
         self.assertFalse(self.benefits(second).exists())
         self.assertIn(
             f"beneficiary {self.graduate.id} (individual {self.graduate.individual_id}) not paid: "
-            "already has a benefit under this payment plan that is not rejected",
+            "already has a cash benefit for this tranche that is not rejected",
             "\n".join(logs.output),
         )
 
@@ -169,9 +170,18 @@ class UpgCashGrantTest(AttendanceGrantRunMixin, TestCase):
         first.save(username=self.user.username)
         self.assertEqual(self.benefits(self.run_payroll(plan)).count(), 1)
 
-    def test_benefits_under_another_plan_do_not_count_as_duplicates(self):
+    def test_another_cash_plan_of_the_programme_does_not_pay_again(self):
+        # For example a plan re-created to fix a mistake.
         self.run_payroll(self.payment_plan())
-        self.assertEqual(self.benefits(self.run_payroll(self.payment_plan())).count(), 1)
+        self.assertFalse(self.benefits(self.run_payroll(self.payment_plan())).exists())
+
+    def test_the_rule_declares_its_payment_plan_parameters(self):
+        parameters = AttendanceGrantCalculationRule.get_parameters(None, "PaymentPlan", self.payment_plan())
+        self.assertEqual([parameter["name"] for parameter in parameters], [
+            "grant_component", "grant_amount_source", "grant_amount", "tranche_percentage",
+            "minimum_attendance_percentage",
+        ])
+        self.assertEqual([option["value"] for option in parameters[0]["optionSet"]], ["null", "cash", "in_kind"])
 
     def test_the_payroll_selection_narrows_who_is_paid(self):
         payroll = self.run_payroll(

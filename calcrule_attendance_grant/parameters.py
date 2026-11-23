@@ -20,7 +20,8 @@ DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE = Decimal("80")
 
 
 def _is_blank(value):
-    return value is None or (isinstance(value, str) and not value.strip())
+    # "null" is the Payment Plan form's empty choice.
+    return value is None or (isinstance(value, str) and value.strip() in ("", "null"))
 
 
 def _parse_decimal(value):
@@ -63,11 +64,11 @@ class GrantParameters:
                 "supported yet"
             )
 
-        component = rule.get("grant_component")
+        component = None if _is_blank(rule.get("grant_component")) else rule.get("grant_component")
         if component not in GRANT_COMPONENTS:
             errors.append("grant_component must be one of %s" % ", ".join(GRANT_COMPONENTS))
 
-        source = rule.get("grant_amount_source")
+        source = None if _is_blank(rule.get("grant_amount_source")) else rule.get("grant_amount_source")
         if source not in GRANT_SOURCES:
             errors.append(
                 "grant_amount_source must be one of %s" % ", ".join(GRANT_SOURCES)
@@ -85,13 +86,10 @@ class GrantParameters:
         tranche_percentage = cls._percentage(
             rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGE, errors
         )
-        minimum_attendance = cls._percentage(
-            rule, "minimum_attendance_percentage",
-            DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE, errors,
-        )
         # The modules come from each beneficiary's training, a tick always means
         # attended, and the programme decides which training status counts.
         programme = ProgrammeSettings.from_benefit_plan(payment_plan.benefit_plan, errors)
+        minimum_attendance = cls._minimum_attendance(rule, programme, errors)
         if component == GRANT_COMPONENT_IN_KIND and programme.allowed_grant_types and not any(
                 grant_type in programme.allowed_grant_types for grant_type in IN_KIND_TYPES):
             errors.append("an in_kind plan needs a programme that allows EQUIPMENT or SERVICE")
@@ -109,6 +107,23 @@ class GrantParameters:
             minimum_attendance_percentage=minimum_attendance,
             programme=programme,
         )
+
+    @classmethod
+    def _minimum_attendance(cls, rule, programme, errors):
+        """The plan's attendance minimum. A programme that disqualifies participants
+        below a percentage (UMEP) needs it set, at least that high, so a plan saved
+        without it never pays at the general default."""
+        disqualification = programme.training_disqualification_percentage
+        if disqualification is not None and _is_blank(rule.get("minimum_attendance_percentage")):
+            errors.append("minimum_attendance_percentage is required for this programme (at least %s)"
+                          % f"{disqualification.normalize():f}")
+            return DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE
+        minimum = cls._percentage(rule, "minimum_attendance_percentage",
+                                  DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE, errors)
+        if disqualification is not None and minimum < disqualification:
+            errors.append("minimum_attendance_percentage must be at least the programme's "
+                          "training_disqualification_percentage (%s)" % f"{disqualification.normalize():f}")
+        return minimum
 
     @staticmethod
     def _percentage(rule, name, default, errors):

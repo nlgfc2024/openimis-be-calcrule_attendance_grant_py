@@ -55,11 +55,27 @@ class GrantParametersTest(SimpleTestCase):
     def test_reads_the_programme_disqualification_percentage(self):
         for value in (90, "90"):
             with self.subTest(value=value):
-                plan = payment_plan_stub(self.rule(), programme={
+                plan = payment_plan_stub(self.rule(minimum_attendance_percentage="90"), programme={
                     "allowed_grant_types": ["CASH"], "training_disqualification_percentage": value})
                 programme = GrantParameters.from_payment_plan(plan).programme
                 self.assertEqual(programme.training_disqualification_percentage, Decimal("90"))
                 self.assertTrue(programme.counts_completed_trainings_only)
+
+    def test_a_disqualifying_programme_needs_its_minimum_set_at_least_that_high(self):
+        umep = {"allowed_grant_types": ["CASH"], "training_disqualification_percentage": 90}
+        self.assert_configuration_error(
+            "minimum_attendance_percentage is required for this programme (at least 90)", programme=umep)
+        self.assert_configuration_error(
+            "minimum_attendance_percentage must be at least the programme's training_disqualification_percentage (90)",
+            rule=self.rule(minimum_attendance_percentage="80"), programme=umep)
+
+    def test_the_forms_empty_choice_counts_as_missing(self):
+        self.assert_configuration_error("grant_component must be one of cash, in_kind",
+                                        rule=self.rule(grant_component="null"))
+        self.assert_configuration_error("grant_amount_source must be one of payment_plan, beneficiary_json",
+                                        rule=self.rule(grant_amount_source="null"))
+        self.assertEqual(self.parse(minimum_attendance_percentage="null").minimum_attendance_percentage,
+                         Decimal("80"))
 
     def test_rejects_an_invalid_programme_disqualification_percentage(self):
         self.assert_configuration_error(
