@@ -17,7 +17,7 @@ import logging
 from core.service_signals import ServiceSignalBindType
 from core.signals import bind_service_signal
 
-from calcrule_attendance_grant.plan_approval import BUSINESS_EVENT, apply_decision, check_decision
+from calcrule_attendance_grant.plan_approval import BUSINESS_EVENTS, apply_decision, check_decision
 from calcrule_attendance_grant.protected_fields import check_protected_changes
 
 SERVICE_SIGNALS = (
@@ -70,7 +70,7 @@ def protect_on_task_approval(**kwargs):
     if task is None:
         return
     user = kwargs["cls_"].user
-    if task.business_event == BUSINESS_EVENT:
+    if task.business_event in BUSINESS_EVENTS:
         check_decision(user, task, statuses, obj_data.get("additional_data"))
     elif TasksManagementConfig.task_user_approved in statuses.values():
         _check_task(user, task.business_event, task.data, task.entity_id)
@@ -84,7 +84,7 @@ def apply_plan_decision(**kwargs):
     result = kwargs.get("result") or {}
     data = result.get("data") or {}
     task_data = data.get("task") or {}
-    if not result.get("success") or task_data.get("business_event") != BUSINESS_EVENT:
+    if not result.get("success") or task_data.get("business_event") not in BUSINESS_EVENTS:
         return
     try:
         task = Task.objects.get(id=task_data["id"])

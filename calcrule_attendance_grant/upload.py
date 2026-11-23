@@ -1,27 +1,40 @@
 """The "Python Beneficiary Grant and Utilization Update" upload workflow.
 
-It records grant amounts and types, per-tranche amounts, plan approval and the
-utilization assessment on each beneficiary's ``json_ext``: ``GroupBeneficiary`` for a
-GROUP programme (UPG, RMEP), ``Beneficiary`` for an INDIVIDUAL one (UMEP).
+It records grant details or utilization assessments on each beneficiary's
+``json_ext``: ``GroupBeneficiary`` for a GROUP programme (UPG, RMEP), ``Beneficiary``
+for an INDIVIDUAL one (UMEP). A file holds one or the other:
+
+- Grant details (grant types, amounts, business plan reference) are submitted for
+  approval: the file's valid rows become one plan approval task (see plan_approval),
+  and nothing is saved until it is decided.
+- Utilization assessments are saved through the beneficiary services, so rights,
+  history and, for INDIVIDUAL beneficiaries with
+  ``enable_maker_checker_for_beneficiary_update``, update tasks apply. Household
+  beneficiaries have no update task, so their rows are saved directly.
 
 Unlike "Python Beneficiaries Update", it accepts only these keys, stores numbers as
-numbers, merges only the submitted keys, and saves through the beneficiary services,
-so the rights in protected_fields, history and maker-checker all apply. A blank cell
-means "not submitted": an upload never clears a recorded value.
+numbers and merges only the submitted keys. A blank cell means "not submitted": an
+upload never clears a recorded value.
 """
 import datetime
 import logging
 import math
 import uuid
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from calcrule_attendance_grant.apps import CalcruleAttendanceGrantConfig
 from calcrule_attendance_grant.grants import CASH, GRANT_TYPES, tranche_amount_key
+from calcrule_attendance_grant.plan_approval import (
+    PlanApprovalService,
+    beneficiary_type_of,
+    open_approval_beneficiary_ids,
+)
 from calcrule_attendance_grant.programme import ProgrammeSettings
 from calcrule_attendance_grant.protected_fields import (
+    GRANT_KEYS,
     PLAN_AND_GRANT_KEYS,
     UTILIZATION_KEYS,
     as_json_ext,
@@ -34,13 +47,14 @@ WORKFLOW_NAME = "Python Beneficiary Grant and Utilization Update"
 WORKFLOW_GROUP = "socialProtection"
 ID_COLUMN = "ID"
 
-AMOUNT_KEYS = tuple(key for key in PLAN_AND_GRANT_KEYS if key.endswith("_amount"))
-TEXT_KEYS = ("business_plan_reference", "plan_approved_by", "utilization_assessed_by", "utilization_notes")
-DATE_KEYS = ("plan_approved_on", "utilization_assessed_on")
-PLAN_STATUSES = ("PENDING", "APPROVED", "REJECTED")
+AMOUNT_KEYS = tuple(key for key in GRANT_KEYS if key.endswith("_amount"))
+TEXT_KEYS = ("business_plan_reference", "utilization_assessed_by", "utilization_notes")
+DATE_KEYS = ("utilization_assessed_on",)
 YES_NO = ("YES", "NO")
 CENT = Decimal("0.01")
-DEFAULT_TRANCHE_SHARES = {1: Decimal("70"), 2: Decimal("30")}
+# Spreadsheet day numbers count from 1899-12-30; epoch milliseconds are far larger.
+SPREADSHEET_EPOCH = datetime.date(1899, 12, 30)
+LAST_SPREADSHEET_DAY = 2958465
 
 
 class GrantUploadError(Exception):
@@ -64,7 +78,7 @@ def process_grant_and_utilization_update(user_uuid, benefit_plan_uuid, upload_uu
     upload = IndividualDataSourceUpload.objects.get(id=upload_uuid)
     rows = list(IndividualDataSource.objects.filter(upload_id=upload_uuid, is_deleted=False).order_by("date_created", "id"))
     try:
-        summary = GrantUtilizationUpload(user, benefit_plan).process(rows)
+        summary = GrantUtilizationUpload(user, benefit_plan).process(rows, upload)
     except GrantUploadError as error:
         # The import service marks the upload FAIL with this message.
         raise PythonWorkflowHandlerException(str(error))
@@ -84,10 +98,10 @@ class UploadSummary:
     def upload_status(self, statuses):
         if self.invalid and not (self.applied or self.tasks):
             return statuses.FAIL
-        if self.invalid:
-            return statuses.PARTIAL_SUCCESS
         if self.tasks:
             return statuses.WAITING_FOR_VERIFICATION
+        if self.invalid:
+            return statuses.PARTIAL_SUCCESS
         return statuses.SUCCESS
 
     def as_dict(self):
@@ -100,17 +114,33 @@ class GrantUtilizationUpload:
         self.benefit_plan = benefit_plan
         self.is_group = benefit_plan.type == "GROUP"
 
-    def process(self, rows):
+    def process(self, rows, upload=None):
         columns = self._columns(rows)
         self._check_columns(columns)
         self._check_rights(columns)
         programme = self._programme(columns)
         beneficiaries = self._beneficiaries(rows)
+        repeated = self._repeated_ids(rows)
+        is_grant_file = bool(columns & set(GRANT_KEYS))
+        waiting = open_approval_beneficiary_ids(beneficiaries) if is_grant_file else set()
 
-        summary = UploadSummary()
+        summary, proposals = UploadSummary(), []
         for row in rows:
-            errors, warnings, patch, beneficiary = self._validate_row(row, programme, beneficiaries)
-            if not errors:
+            errors, patch, beneficiary = self._validate_row(row, programme, beneficiaries, is_grant_file)
+            beneficiary_id = str(beneficiary.id) if beneficiary is not None else None
+            if beneficiary_id in repeated:
+                errors.append({"field_name": ID_COLUMN, "note": "appears in more than one row of the file"})
+            if beneficiary_id in waiting:
+                errors.append({"field_name": ID_COLUMN, "note": "already has a plan approval waiting for a decision"})
+            if not errors and is_grant_file and not patch:
+                errors.append({"field_name": None, "note": "has no grant details to submit"})
+            if not errors and is_grant_file:
+                current = as_json_ext(beneficiary.json_ext)
+                proposals.append({
+                    "id": beneficiary_id, "incoming_data": patch,
+                    "current_data": {key: current.get(key) for key in PLAN_AND_GRANT_KEYS if key in current},
+                })
+            elif not errors:
                 try:
                     created_task = self._apply(beneficiary, patch)
                 except ValidationError as error:
@@ -122,8 +152,14 @@ class GrantUtilizationUpload:
                         summary.applied += 1
             if errors:
                 summary.invalid += 1
-            row.validations = {"validation_errors": errors, "validation_warnings": warnings}
+            row.validations = {"validation_errors": errors, "validation_warnings": []}
             row.save(username=self.user.login_name)
+
+        if proposals:
+            beneficiary_type = beneficiary_type_of(next(iter(beneficiaries.values())))
+            PlanApprovalService(self.user).submit_upload(
+                upload, self.benefit_plan, beneficiary_type, proposals, invalid_rows=summary.invalid)
+            summary.tasks += 1
         return summary
 
     # Upload-level checks
@@ -139,18 +175,29 @@ class GrantUtilizationUpload:
     def _check_columns(columns):
         if ID_COLUMN not in columns:
             raise GrantUploadError("The upload needs an %s column with the beneficiary ID." % ID_COLUMN)
-        unknown = sorted(columns - {ID_COLUMN} - set(PLAN_AND_GRANT_KEYS) - set(UTILIZATION_KEYS))
+        decisions = sorted(columns & (set(PLAN_AND_GRANT_KEYS) - set(GRANT_KEYS)))
+        if decisions:
+            raise GrantUploadError(
+                "The plan status and approval are recorded when a plan approval is decided, not uploaded. "
+                "Remove the columns: %s." % ", ".join(decisions)
+            )
+        unknown = sorted(columns - {ID_COLUMN} - set(GRANT_KEYS) - set(UTILIZATION_KEYS))
         if unknown:
             raise GrantUploadError(
-                "The upload accepts only %s and the grant, plan and utilization keys. Unknown columns: %s."
+                "The upload accepts only %s and the grant and utilization keys. Unknown columns: %s."
                 % (ID_COLUMN, ", ".join(unknown))
+            )
+        if columns & set(GRANT_KEYS) and columns & set(UTILIZATION_KEYS):
+            raise GrantUploadError(
+                "Upload grant details and utilization assessments in separate files: grant details go "
+                "for approval, utilization assessments are saved directly."
             )
 
     def _check_rights(self, columns):
         problems = []
-        if columns & set(PLAN_AND_GRANT_KEYS) and not self.user.has_perms(
+        if columns & set(GRANT_KEYS) and not self.user.has_perms(
                 CalcruleAttendanceGrantConfig.gql_plans_and_grants_perms):
-            problems.append("plan and grant columns need the right to manage beneficiary plans and grants")
+            problems.append("grant columns need the right to manage beneficiary plans and grants")
         if columns & set(UTILIZATION_KEYS) and not self.user.has_perms(
                 CalcruleAttendanceGrantConfig.gql_utilization_assessment_perms):
             problems.append("utilization columns need the right to record utilization assessments")
@@ -165,6 +212,15 @@ class GrantUtilizationUpload:
             raise GrantUploadError("The programme is not set up for grants: %s." % "; ".join(errors))
         return programme
 
+    @staticmethod
+    def _repeated_ids(rows):
+        seen, repeated = set(), set()
+        for row in rows:
+            beneficiary_id = _uuid((row.json_ext or {}).get(ID_COLUMN))
+            if beneficiary_id is not None:
+                (repeated if str(beneficiary_id) in seen else seen).add(str(beneficiary_id))
+        return repeated
+
     def _beneficiaries(self, rows):
         from social_protection.models import Beneficiary, GroupBeneficiary
 
@@ -177,9 +233,9 @@ class GrantUtilizationUpload:
 
     # Row validation
 
-    def _validate_row(self, row, programme, beneficiaries):
+    def _validate_row(self, row, programme, beneficiaries, is_grant_file):
         data = row.json_ext or {}
-        errors, warnings, patch = [], [], {}
+        errors, patch = [], {}
 
         def error(field, note):
             errors.append({"field_name": field, "note": note})
@@ -191,7 +247,7 @@ class GrantUtilizationUpload:
             error(ID_COLUMN, "%r is not a %s of this programme" % (data.get(ID_COLUMN), kind))
 
         for key, value in data.items():
-            if key == ID_COLUMN or key not in PLAN_AND_GRANT_KEYS + UTILIZATION_KEYS or _blank(value):
+            if key == ID_COLUMN or key not in GRANT_KEYS + UTILIZATION_KEYS or _blank(value):
                 continue
             parsed, note = self._parse(key, value, programme)
             if note:
@@ -201,21 +257,21 @@ class GrantUtilizationUpload:
 
         if beneficiary is not None and not errors:
             merged = {**as_json_ext(beneficiary.json_ext), **patch}
-            self._check_tranches(merged, patch, programme, error, warnings)
-            try:
-                check_protected_changes(self.user, beneficiary.json_ext, merged)
-            except ValidationError as exc:
-                for message in exc.messages:
-                    error(None, message)
-        return errors, warnings, patch, beneficiary
+            if is_grant_file:
+                self._check_tranches(merged, patch, programme, error)
+            else:
+                try:
+                    check_protected_changes(self.user, beneficiary.json_ext, merged)
+                except ValidationError as exc:
+                    for message in exc.messages:
+                        error(None, message)
+        return errors, patch, beneficiary
 
     def _parse(self, key, value, programme):
         if key == "grant_types":
             return _grant_types(value, programme.allowed_grant_types)
         if key in AMOUNT_KEYS:
             return _amount(value, positive=key == "approved_grant_amount")
-        if key == "business_plan_status":
-            return _choice(value, PLAN_STATUSES)
         if key == "utilization_confirmed":
             return _choice(value, YES_NO)
         if key == "utilization_percentage":
@@ -228,7 +284,9 @@ class GrantUtilizationUpload:
         return _text(value)
 
     @staticmethod
-    def _check_tranches(merged, patch, programme, error, warnings):
+    def _check_tranches(merged, patch, programme, error):
+        """Per-tranche amounts must fit the grant types. Whether a tranche adds up to its
+        share is checked by the payroll, against the payment plan's percentage."""
         types = merged.get("grant_types")
         if not isinstance(types, list) or not types:
             types = list(programme.allowed_grant_types) if len(programme.allowed_grant_types) == 1 else []
@@ -239,25 +297,6 @@ class GrantUtilizationUpload:
                     error(key, "is not zero but %s is not one of the grant types" % grant_type)
                 if tranche == 2 and key in patch and patch[key] and CASH not in types:
                     error(key, "a grant without cash has no second tranche")
-
-        amount = merged.get("approved_grant_amount")
-        for tranche in (1, 2):
-            keys = [tranche_amount_key(tranche, grant_type) for grant_type in GRANT_TYPES]
-            touched = "approved_grant_amount" in patch or any(key in patch for key in keys)
-            if not touched or amount is None or not any(key in merged for key in keys):
-                continue
-            percentage = DEFAULT_TRANCHE_SHARES[tranche] if CASH in types else (Decimal("100") if tranche == 1 else None)
-            if percentage is None:
-                continue
-            share = (Decimal(str(amount)) * percentage / 100).quantize(CENT, rounding=ROUND_HALF_UP)
-            total = sum((Decimal(str(merged.get(key) or 0)) for key in keys), Decimal("0")).quantize(CENT)
-            if total != share:
-                warnings.append({
-                    "field_name": keys[0],
-                    "note": "tranche-%s amounts add up to %s, not the default %s%% share of %s (%s); "
-                            "the payroll checks the payment plan's percentage"
-                            % ("one" if tranche == 1 else "two", total, f"{percentage.normalize():f}", amount, share),
-                })
 
     # Saving
 
@@ -335,13 +374,17 @@ def _choice(value, choices):
 
 
 def _date(value):
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 10 ** 11:
-        # A spreadsheet date, which the upload stores as epoch milliseconds.
-        return datetime.datetime.fromtimestamp(value / 1000, tz=datetime.timezone.utc).date().isoformat(), None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value > 10 ** 11:
+            # A spreadsheet date the upload stored as epoch milliseconds.
+            return datetime.datetime.fromtimestamp(value / 1000, tz=datetime.timezone.utc).date().isoformat(), None
+        if 1 <= value <= LAST_SPREADSHEET_DAY and value == int(value):
+            # A spreadsheet day number, such as 45980.
+            return (SPREADSHEET_EPOCH + datetime.timedelta(days=int(value))).isoformat(), None
     try:
         return datetime.date.fromisoformat(str(value).strip()[:10]).isoformat(), None
     except ValueError:
-        return None, "must be a date as YYYY-MM-DD, got %r" % (value,)
+        return None, "must be a date as YYYY-MM-DD or a spreadsheet date, got %r" % (value,)
 
 
 def _text(value):

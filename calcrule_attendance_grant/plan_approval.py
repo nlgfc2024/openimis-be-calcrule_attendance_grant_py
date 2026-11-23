@@ -1,8 +1,9 @@
 """Business plan approval through a maker-checker task.
 
 A user with the plans-and-grants right submits a beneficiary's grant and business
-plan details (grant types, amounts, business plan reference). The submission is a
-task holding the proposed values; the beneficiary is not changed yet.
+plan details (grant types, amounts, business plan reference), one at a time or as
+an upload file. The submission is a task holding the proposed values, one task per
+beneficiary or per file; the beneficiaries are not changed yet.
 
 The task goes to the task group whose ``task_sources`` include ``TASK_SOURCE``. An
 executor of that group with the plan approval right approves or rejects it through
@@ -42,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 TASK_SOURCE = "calcrule_attendance_grant.plan_approval"
 BUSINESS_EVENT = "calcrule_attendance_grant.plan_approval"
+UPLOAD_BUSINESS_EVENT = "calcrule_attendance_grant.plan_approval_upload"
+BUSINESS_EVENTS = (BUSINESS_EVENT, UPLOAD_BUSINESS_EVENT)
+OPEN_STATUSES = ("RECEIVED", "ACCEPTED")
 # Task data key telling which beneficiary model the task is for.
 BENEFICIARY_TYPE_KEY = "beneficiary_type"
 INDIVIDUAL_BENEFICIARY = "Beneficiary"
@@ -88,6 +92,8 @@ class PlanApprovalService:
             raise ValidationError(_("Only users with the right to manage beneficiary plans and grants can "
                                     "submit them for approval."))
         proposed = validate_proposal(proposed, beneficiary.benefit_plan)
+        if open_approval_beneficiary_ids([beneficiary.id]):
+            raise ValidationError(_("This beneficiary already has a plan approval waiting for a decision."))
         current = as_json_ext(beneficiary.json_ext)
         if not changed_keys(current, {**current, **proposed}, GRANT_KEYS) \
                 and current.get("business_plan_status") == APPROVED:
@@ -111,6 +117,51 @@ class PlanApprovalService:
         if not result.get("success"):
             raise ValidationError(result.get("detail") or result.get("message") or _("The task was not created."))
         return result
+
+    def submit_upload(self, upload, benefit_plan, beneficiary_type, rows, invalid_rows=0):
+        """Create one approval task for an upload file's valid ``rows``.
+
+        Each row is ``{"id": <beneficiary ID>, "incoming_data": {...}, "current_data": {...}}``.
+        """
+        from tasks_management.apps import TasksManagementConfig
+        from tasks_management.models import Task
+        from tasks_management.services import TaskService
+
+        result = TaskService(self.user).create({
+            "source": TASK_SOURCE,
+            "entity_type": ContentType.objects.get_for_model(upload),
+            "entity_id": str(upload.id),
+            "status": Task.Status.RECEIVED,
+            "executor_action_event": TasksManagementConfig.default_executor_event,
+            "business_event": UPLOAD_BUSINESS_EVENT,
+            "data": {BENEFICIARY_TYPE_KEY: beneficiary_type, "rows": rows},
+            "json_ext": {
+                "benefit_plan_code": benefit_plan.code, "source_name": upload.source_name,
+                "data_upload_id": str(upload.id), "rows": len(rows), "invalid_rows": invalid_rows,
+            },
+        })
+        if not result.get("success"):
+            raise ValidationError(result.get("detail") or result.get("message") or _("The task was not created."))
+        return result
+
+
+def open_approval_beneficiary_ids(beneficiary_ids):
+    """The IDs, among ``beneficiary_ids``, of beneficiaries with a plan approval waiting."""
+    from django.db.models import Q
+    from tasks_management.models import Task
+
+    ids = {str(beneficiary_id) for beneficiary_id in beneficiary_ids}
+    if not ids:
+        return set()
+    open_tasks = Task.objects.filter(is_deleted=False, status__in=OPEN_STATUSES)
+    waiting = set(open_tasks.filter(business_event=BUSINESS_EVENT, entity_id__in=ids)
+                  .values_list("entity_id", flat=True))
+    upload_rows = Q()
+    for beneficiary_id in ids:
+        upload_rows |= Q(data__rows__contains=[{"id": beneficiary_id}])
+    for rows in open_tasks.filter(upload_rows, business_event=UPLOAD_BUSINESS_EVENT).values_list("data__rows", flat=True):
+        waiting |= {row.get("id") for row in rows or []} & ids
+    return waiting
 
 
 def validate_proposal(proposed, benefit_plan):
@@ -193,15 +244,39 @@ def _is_executor(user, task):
 
 
 def apply_decision(task, user):
-    """Save the decision of a completed or failed approval task on its beneficiary."""
+    """Save the decision of a completed or failed approval task on its beneficiaries."""
     from tasks_management.models import Task
 
+    if task.status not in (Task.Status.COMPLETED, Task.Status.FAILED):
+        return
+    approved = task.status == Task.Status.COMPLETED
+    reason = None if approved else rejection_reason(
+        ((task.json_ext or {}).get("additional_resolve_data") or {}).get(str(user.id)))
     model = beneficiary_model(task.data.get(BENEFICIARY_TYPE_KEY, INDIVIDUAL_BENEFICIARY))
-    beneficiary = model.objects.get(id=task.entity_id)
-    json_ext = dict(as_json_ext(beneficiary.json_ext))
 
-    if task.status == Task.Status.COMPLETED:
-        for key, value in (task.data.get("incoming_data") or {}).items():
+    if task.business_event == UPLOAD_BUSINESS_EVENT:
+        proposals = [(row["id"], row.get("incoming_data") or {}) for row in task.data.get("rows") or []]
+    else:
+        proposals = [(task.entity_id, task.data.get("incoming_data") or {})]
+
+    with applying_plan_decision():
+        for beneficiary_id, proposal in proposals:
+            beneficiary = model.objects.filter(id=beneficiary_id, is_deleted=False).first()
+            if beneficiary is None:
+                logger.warning("Plan approval task %s: beneficiary %s no longer exists", task.id, beneficiary_id)
+                continue
+            beneficiary.json_ext = decided_json_ext(beneficiary.json_ext, proposal, approved, user, reason)
+            beneficiary.save(user=user)
+
+    if task.business_event == UPLOAD_BUSINESS_EVENT:
+        _close_upload(task, approved, reason, user)
+
+
+def decided_json_ext(json_ext, proposal, approved, user, reason):
+    """``json_ext`` with an approval's proposal and decision recorded."""
+    json_ext = dict(as_json_ext(json_ext))
+    if approved:
+        for key, value in proposal.items():
             if value is None:
                 json_ext.pop(key, None)
             else:
@@ -213,14 +288,24 @@ def apply_decision(task, user):
             "plan_approved_by_id": str(user.id),
         })
         json_ext.pop("plan_rejection_reason", None)
-    elif task.status == Task.Status.FAILED:
-        reason = rejection_reason(((task.json_ext or {}).get("additional_resolve_data") or {}).get(str(user.id)))
+    else:
         for key in ("plan_approved_on", "plan_approved_by", "plan_approved_by_id"):
             json_ext.pop(key, None)
         json_ext.update({"business_plan_status": REJECTED, "plan_rejection_reason": reason})
-    else:
-        return
+    return json_ext
 
-    with applying_plan_decision():
-        beneficiary.json_ext = json_ext
-        beneficiary.save(user=user)
+
+def _close_upload(task, approved, reason, user):
+    from individual.models import IndividualDataSourceUpload
+
+    upload = IndividualDataSourceUpload.objects.filter(id=task.entity_id).first()
+    if upload is None:
+        return
+    if approved:
+        partial = (task.json_ext or {}).get("invalid_rows")
+        upload.status = IndividualDataSourceUpload.Status.PARTIAL_SUCCESS if partial \
+            else IndividualDataSourceUpload.Status.SUCCESS
+    else:
+        upload.status = IndividualDataSourceUpload.Status.FAIL
+        upload.error = {"Task Resolve": _("The plan approval was rejected: %s") % reason}
+    upload.save(user=user)
