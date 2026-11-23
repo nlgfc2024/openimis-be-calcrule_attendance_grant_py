@@ -19,7 +19,13 @@ from calcrule_attendance_grant.converters import (
     GroupToBillConverter,
     GroupToBillItemConverter,
 )
-from calcrule_attendance_grant.grants import GRANT_COMPONENT_IN_KIND, GRANT_TYPES, IN_KIND_TYPES, resolve_grant
+from calcrule_attendance_grant.grants import (
+    GRANT_COMPONENT_IN_KIND,
+    GRANT_TYPES,
+    IN_KIND_TYPES,
+    grant_from_record,
+    resolve_grant,
+)
 from calcrule_attendance_grant.parameters import GRANT_SOURCE_PAYMENT_PLAN, GrantParameters
 
 logger = logging.getLogger(__name__)
@@ -64,7 +70,9 @@ class AttendanceGrantStrategy:
             params.minimum_attendance_percentage,
             params.programme.counts_completed_trainings_only,
         )
-        already_paid = cls._beneficiaries_with_benefits(payment_plan, params.grant_component)
+        paid_parts = cls._tranche_one_benefits(payment_plan)
+        already_paid = {beneficiary_id for beneficiary_id, records in paid_parts.items()
+                        if any(record.get("grant_component") == params.grant_component for record in records)}
 
         paid = 0
         for payee in payees:
@@ -94,6 +102,17 @@ class AttendanceGrantStrategy:
                 plan_grant_amount=params.grant_amount,
                 tranche_percentage=params.tranche_percentage,
             )
+            recorded = paid_parts.get(str(beneficiary.id))
+            if recorded:
+                # The other part of this tranche is paid: pay this part from the same
+                # tranche, so the two parts always add up to one share.
+                current, grant = grant, grant_from_record(recorded[0])
+                if current.reason or current.amounts != grant.amounts:
+                    logger.warning(
+                        "Attendance grant, payment plan %s: %s: the grant details changed after the %s part of "
+                        "this tranche was paid; paying from the tranche recorded then.",
+                        payment_plan.code, payee.label, recorded[0].get("grant_component", "other"),
+                    )
             if grant.reason:
                 cls._log_excluded(payment_plan, payee, grant.reason, level=logging.WARNING)
                 continue
@@ -196,26 +215,8 @@ class AttendanceGrantStrategy:
             )
 
     @staticmethod
-    def _beneficiaries_with_benefits(payment_plan, grant_component):
-        """IDs of the beneficiaries (Bill subjects) already paid this part of the
-        tranche: a benefit that was not rejected under any attendance-grant plan of the
-        programme that pays the same part, this plan included, so a plan re-created to
-        fix a mistake does not pay again."""
-        plans = [
-            plan.id for plan in _attendance_grant_plans(payment_plan)
-            if plan.id == payment_plan.id or _plan_component(plan) == grant_component
-        ]
-        return set(
-            BenefitAttachment.objects.filter(
-                is_deleted=False,
-                benefit__is_deleted=False,
-                benefit__payrollbenefitconsumption__is_deleted=False,
-                benefit__payrollbenefitconsumption__payroll__is_deleted=False,
-                benefit__payrollbenefitconsumption__payroll__payment_plan_id__in=plans,
-            ).exclude(
-                benefit__status=BenefitConsumptionStatus.REJECTED,
-            ).values_list("bill__subject_id", flat=True)
-        )
+    def _tranche_one_benefits(payment_plan):
+        return tranche_one_benefits(payment_plan.benefit_plan_id)
 
     @staticmethod
     def _log_excluded(payment_plan, payee, reason, level=logging.INFO):
@@ -281,6 +282,32 @@ class AttendanceGrantStrategy:
         benefit_service.create_or_update_benefit_attachment(Bill.objects.filter(id=bill.id), benefit_id)
         if payroll is not None:
             PayrollService(user=user).attach_benefit_to_payroll(payroll.id, benefit_id)
+
+
+def tranche_one_benefits(benefit_plan_id, beneficiary_ids=None):
+    """{beneficiary ID (Bill subject): [recorded tranche]} for the programme's tranche-one
+    attendance-grant benefits that were not rejected or deleted, optionally only for
+    ``beneficiary_ids``.
+
+    Each benefit records its own part and tranche (``attendance_grant``), so they are
+    found under any payment plan of the programme, including a deleted or changed one.
+    """
+    attachments = BenefitAttachment.objects.filter(
+        is_deleted=False,
+        benefit__is_deleted=False,
+        benefit__payrollbenefitconsumption__is_deleted=False,
+        benefit__payrollbenefitconsumption__payroll__is_deleted=False,
+        benefit__payrollbenefitconsumption__payroll__payment_plan__benefit_plan_id=benefit_plan_id,
+        benefit__json_ext__attendance_grant__tranche=1,
+    ).exclude(benefit__status=BenefitConsumptionStatus.REJECTED)
+    if beneficiary_ids is not None:
+        attachments = attachments.filter(bill__subject_id__in=[str(beneficiary_id) for beneficiary_id in beneficiary_ids])
+    records = {}
+    for subject_id, json_ext in attachments.values_list("bill__subject_id", "benefit__json_ext").distinct():
+        record = (json_ext or {}).get("attendance_grant")
+        if isinstance(record, dict):
+            records.setdefault(str(subject_id), []).append(record)
+    return records
 
 
 def _attendance_grant_plans(payment_plan):

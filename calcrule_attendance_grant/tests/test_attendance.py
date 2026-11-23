@@ -1,8 +1,10 @@
 from decimal import Decimal
+from unittest import skipUnless
 
 from django.test import TestCase
 
 from core.test_helpers import LogInHelper
+from project_social_protection import training_topics
 from project_social_protection.models import BeneficiaryProjectTimeEntry, ProjectStatus
 
 from calcrule_attendance_grant.attendance import evaluate_attendance
@@ -66,6 +68,22 @@ class EvaluateAttendanceTest(TestCase):
     def test_no_training_enrollment_is_a_shortfall(self):
         result = self.evaluate(self.participant('NotEnrolled'))
         self.assertEqual(result.reason, "not enrolled in a training of the programme")
+
+    @skipUnless(hasattr(training_topics, "training_module_completion_for"),
+                "needs the project module's bulk training_module_completion_for")
+    def test_queries_do_not_grow_with_the_number_of_enrollments(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def queries(count, prefix):
+            people = [self.participant(f'{prefix}{index}') for index in range(count)]
+            for person in people:
+                attend(self.user, person, self.training, 15)
+            with CaptureQueriesContext(connection) as captured:
+                evaluate_attendance([person.id for person in people], self.benefit_plan, Decimal("80"), False)
+            return len(captured)
+
+        self.assertEqual(queries(2, 'Few'), queries(6, 'Many'))
 
     def test_a_training_without_topics_is_named_in_the_shortfall(self):
         beneficiary = self.participant('NoTopics')

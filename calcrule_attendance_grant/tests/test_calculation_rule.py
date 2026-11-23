@@ -175,6 +175,13 @@ class UpgCashGrantTest(AttendanceGrantRunMixin, TestCase):
         self.run_payroll(self.payment_plan())
         self.assertFalse(self.benefits(self.run_payroll(self.payment_plan())).exists())
 
+    def test_a_payment_under_a_deleted_plan_still_counts(self):
+        original = self.payment_plan()
+        self.assertEqual(self.benefits(self.run_payroll(original)).count(), 1)
+        original.is_deleted = True
+        original.save(username=self.user.username)
+        self.assertFalse(self.benefits(self.run_payroll(self.payment_plan())).exists())
+
     def test_the_rule_declares_its_payment_plan_parameters(self):
         parameters = AttendanceGrantCalculationRule.get_parameters(None, "PaymentPlan", self.payment_plan())
         self.assertEqual([parameter["name"] for parameter in parameters], [
@@ -257,6 +264,17 @@ class RmepCashAndInKindGrantTest(AttendanceGrantRunMixin, TestCase):
         in_kind = self.benefits(self.run_payroll(self.payment_plan(grant_component="in_kind"))).get(
             individual_id=self.mixed.individual_id)
         self.assertEqual(cash.amount + in_kind.amount, Decimal("700.00"))
+
+    def test_the_second_part_is_paid_from_the_tranche_recorded_with_the_first(self):
+        self.benefits(self.run_payroll(self.payment_plan())).get()
+        # The grant changes after the cash part (200 of a 700 share) was paid.
+        Beneficiary.objects.filter(id=self.mixed.id).update(json_ext={
+            **self.mixed.json_ext, "tranche_1_equipment_amount": 600, "tranche_1_cash_amount": 100})
+        with self.assertLogs(STRATEGY_LOGGER, level="WARNING") as logs:
+            payroll = self.run_payroll(self.payment_plan(grant_component="in_kind"))
+        in_kind = self.benefits(payroll).get(individual_id=self.mixed.individual_id)
+        self.assertEqual(in_kind.amount, Decimal("500.00"))
+        self.assertIn("the grant details changed after the cash part of this tranche was paid", "\n".join(logs.output))
 
     def test_a_tranches_plans_must_use_the_same_tranche_percentage(self):
         cash = self.payment_plan(tranche_percentage="70")
