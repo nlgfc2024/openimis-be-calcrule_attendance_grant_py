@@ -65,6 +65,15 @@ def beneficiary_type_of(beneficiary):
     return GROUP_BENEFICIARY if isinstance(beneficiary, GroupBeneficiary) else INDIVIDUAL_BENEFICIARY
 
 
+def beneficiary_label(beneficiary):
+    """How a reviewer recognises the beneficiary: the person's name or the household code."""
+    group = getattr(beneficiary, "group", None)
+    if group is not None:
+        return group.code
+    individual = beneficiary.individual
+    return " ".join(part for part in (individual.first_name, individual.last_name) if part)
+
+
 def approver_name(user):
     i_user = getattr(user, "i_user", None)
     name = " ".join(part for part in (getattr(i_user, "other_names", None), getattr(i_user, "last_name", None))
@@ -109,6 +118,7 @@ class PlanApprovalService:
                 "business_event": BUSINESS_EVENT,
                 "data": {
                     BENEFICIARY_TYPE_KEY: beneficiary_type_of(beneficiary),
+                    "label": beneficiary_label(beneficiary),
                     "incoming_data": proposed,
                     "current_data": {key: current.get(key) for key in PLAN_AND_GRANT_KEYS if key in current},
                 },
@@ -143,6 +153,23 @@ class PlanApprovalService:
         if not result.get("success"):
             raise ValidationError(result.get("detail") or result.get("message") or _("The task was not created."))
         return result
+
+
+def pending_approval(beneficiary):
+    """The beneficiary's waiting approval as ``(task, proposed values)``, or None."""
+    from tasks_management.models import Task
+
+    beneficiary_id = str(beneficiary.id)
+    open_tasks = Task.objects.filter(is_deleted=False, status__in=OPEN_STATUSES).order_by("-date_created")
+    task = open_tasks.filter(business_event=BUSINESS_EVENT, entity_id=beneficiary_id).first()
+    if task is not None:
+        return task, task.data.get("incoming_data") or {}
+    task = open_tasks.filter(business_event=UPLOAD_BUSINESS_EVENT,
+                             data__rows__contains=[{"id": beneficiary_id}]).first()
+    if task is not None:
+        row = next(row for row in task.data["rows"] if row.get("id") == beneficiary_id)
+        return task, row.get("incoming_data") or {}
+    return None
 
 
 def open_approval_beneficiary_ids(beneficiary_ids):

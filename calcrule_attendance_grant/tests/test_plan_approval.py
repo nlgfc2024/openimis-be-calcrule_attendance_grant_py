@@ -9,7 +9,10 @@ from social_protection.tests.test_helpers import create_group
 from tasks_management.models import Task, TaskExecutor, TaskGroup
 from tasks_management.services import TaskService
 
-from calcrule_attendance_grant.plan_approval import TASK_SOURCE, PlanApprovalService, approver_name
+from types import SimpleNamespace
+
+from calcrule_attendance_grant.plan_approval import TASK_SOURCE, PlanApprovalService, approver_name, beneficiary_label
+from calcrule_attendance_grant.schema import Query
 from calcrule_attendance_grant.tests.helpers import create_participant, create_programme
 from calcrule_attendance_grant.tests.test_protected_fields import user_with
 
@@ -58,8 +61,25 @@ class PlanApprovalTest(TestCase):
             "grant_types": ["CASH", "EQUIPMENT"], "approved_grant_amount": 1000,
             "tranche_1_equipment_amount": 500, "business_plan_reference": "BP-7",
         })
+        self.assertEqual(task.data["label"], beneficiary_label(self.beneficiary))
         self.beneficiary.refresh_from_db()
         self.assertNotIn("approved_grant_amount", self.beneficiary.json_ext)
+
+    def test_the_waiting_approval_can_be_read_until_it_is_decided(self):
+        def pending(user):
+            return Query().resolve_pending_beneficiary_plan_approval(
+                SimpleNamespace(context=SimpleNamespace(user=user)), self.beneficiary.id)
+
+        self.assertIsNone(pending(self.maker))
+        task = self.submit()
+        waiting = pending(self.maker)
+        self.assertEqual((waiting.task_id, waiting.origin, waiting.submitted_by),
+                         (task.id, "form", approver_name(self.maker)))
+        self.assertEqual(waiting.incoming_data["business_plan_reference"], "BP-7")
+        with self.assertRaises(Exception):
+            pending(self.unentitled)
+        self.decide(self.checker, task)
+        self.assertIsNone(pending(self.checker))
 
     def test_only_users_with_the_plans_and_grants_right_can_submit(self):
         with self.assertRaisesMessage(ValidationError, "can submit them for approval"):

@@ -164,6 +164,12 @@ Plan approval uses the CoreMIS maker-checker tasks:
 Who may submit and who may decide is set by roles and task groups, as elsewhere in
 CoreMIS: an administrator can let one user do both, or give the decision to others.
 
+The task data names each beneficiary (`label`: the person's name or the household
+code) for the reviewer. The `pendingBeneficiaryPlanApproval(beneficiaryId, isGroup)`
+query returns a beneficiary's waiting approval (task, form or upload, submitter,
+date and proposed values) to users holding any of the three rights, since makers
+cannot see tasks outside their task groups.
+
 The generic "Python Beneficiaries Update" upload writes `json_ext` in SQL, so these
 hooks do not see it. It only writes keys declared in the programme's
 `beneficiary_data_schema`, so do not declare the grant and decision keys there.

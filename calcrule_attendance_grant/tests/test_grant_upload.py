@@ -13,7 +13,12 @@ from tasks_management.services import TaskService
 from workflow.exceptions import PythonWorkflowHandlerException
 from workflow.systems.python import PythonWorkflowAdaptor
 
-from calcrule_attendance_grant.plan_approval import TASK_SOURCE, UPLOAD_BUSINESS_EVENT, PlanApprovalService
+from calcrule_attendance_grant.plan_approval import (
+    TASK_SOURCE,
+    UPLOAD_BUSINESS_EVENT,
+    PlanApprovalService,
+    beneficiary_label,
+)
 from calcrule_attendance_grant.tests.helpers import create_participant, create_programme
 from calcrule_attendance_grant.tests.test_protected_fields import user_with
 from calcrule_attendance_grant.upload import (
@@ -90,6 +95,7 @@ class GrantUploadTest(TestCase):
                                        "tranche_1_equipment_amount": 500, "business_plan_reference": "BP-1"},
             str(self.other.id): {"business_plan_reference": "77"},
         })
+        self.assertEqual(task.data["rows"][0]["label"], beneficiary_label(self.beneficiary))
         self.beneficiary.refresh_from_db()
         self.assertEqual(self.beneficiary.json_ext, {"note": "keep"})
 

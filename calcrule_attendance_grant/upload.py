@@ -29,6 +29,7 @@ from calcrule_attendance_grant.apps import CalcruleAttendanceGrantConfig
 from calcrule_attendance_grant.grants import CASH, GRANT_TYPES, tranche_amount_key
 from calcrule_attendance_grant.plan_approval import (
     PlanApprovalService,
+    beneficiary_label,
     beneficiary_type_of,
     open_approval_beneficiary_ids,
 )
@@ -137,7 +138,7 @@ class GrantUtilizationUpload:
             if not errors and is_grant_file:
                 current = as_json_ext(beneficiary.json_ext)
                 proposals.append({
-                    "id": beneficiary_id, "incoming_data": patch,
+                    "id": beneficiary_id, "label": beneficiary_label(beneficiary), "incoming_data": patch,
                     "current_data": {key: current.get(key) for key in PLAN_AND_GRANT_KEYS if key in current},
                 })
             elif not errors:
