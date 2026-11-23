@@ -55,7 +55,9 @@ beneficiary when all of the following hold:
 
    must reach `minimum_attendance_percentage`. Each module is evaluated on its own.
    If the beneficiary has several trainings of the programme, each module's best
-   result counts. Training status does not matter, except for a programme that sets
+   result counts; completion is read for the whole payroll at once with the project
+   module's `training_module_completion_for` when it is available. Training status
+   does not matter, except for a programme that sets
    `training_disqualification_percentage` (UMEP): its trainings count only once
    COMPLETED.
 2. **Approved plan.** `business_plan_status` is `APPROVED`, and `plan_approved_on` and
@@ -65,9 +67,12 @@ beneficiary when all of the following hold:
 3. **A valid grant and tranche make-up** (see below), with a non-zero part for this
    plan.
 4. **No earlier payment.** The beneficiary has no BenefitConsumption, other than a
-   rejected or deleted one, under any attendance-grant PaymentPlan of the programme
-   that pays the same part (`cash` or `in_kind`), so a plan re-created to fix a
-   mistake does not pay again. Runs for one programme take turns: the rule locks the
+   rejected or deleted one, that records the same part (`cash` or `in_kind`) of the
+   same tranche under any PaymentPlan of the programme, including a deleted or
+   changed one, so a plan re-created to fix a mistake does not pay again. Once one
+   part of a tranche is paid, the other part is paid from the tranche recorded on
+   that payment (grant amount, types and split), not from the beneficiary's current
+   values, so the two parts always add up to one share; a difference is logged. Runs for one programme take turns: the rule locks the
    programme until the payroll is saved, so two runs never both pay a person.
 
 ### Grant amount, share and parts
