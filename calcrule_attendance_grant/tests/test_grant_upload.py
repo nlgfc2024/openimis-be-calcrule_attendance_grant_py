@@ -20,7 +20,8 @@ from calcrule_attendance_grant.plan_approval import (
     beneficiary_label,
 )
 from calcrule_attendance_grant.tests.helpers import create_participant, create_programme
-from calcrule_attendance_grant.tests.test_protected_fields import user_with
+from calcrule_attendance_grant.protected_fields import tranche_one_shortfall_of
+from calcrule_attendance_grant.tests.test_protected_fields import TrancheOnePaidMixin, user_with
 from calcrule_attendance_grant.upload import (
     WORKFLOW_GROUP,
     WORKFLOW_NAME,
@@ -228,7 +229,7 @@ class GrantUploadTest(TestCase):
 
 
 @patch.object(SocialProtectionConfig, "enable_maker_checker_for_beneficiary_update", False)
-class UtilizationUploadTest(TestCase):
+class UtilizationUploadTest(TrancheOnePaidMixin, TestCase):
     """Utilization files are saved directly through the beneficiary services."""
 
     @classmethod
@@ -238,7 +239,18 @@ class UtilizationUploadTest(TestCase):
         cls.assessor = user_with("ag_uplu_assessor", "gql_utilization_assessment_perms")
 
     def setUp(self):
+        super().setUp()
         self.beneficiary = create_participant(self.admin, self.benefit_plan, 'Assessed', {"note": "keep"})
+
+    def test_an_assessment_waits_for_tranche_one_to_be_paid_in_full(self):
+        self.tranche_one_shortfall.side_effect = tranche_one_shortfall_of
+        upload, summary = upload_rows(self.assessor, self.benefit_plan, {
+            "ID": str(self.beneficiary.id), "utilization_percentage": 85, **ASSESSED})
+        self.assertEqual(summary["applied"], 0)
+        self.assertIn("only once tranche one is paid in full: no tranche-one payment of the programme",
+                      row_errors(upload)[str(self.beneficiary.id)][0]["note"])
+        self.beneficiary.refresh_from_db()
+        self.assertEqual(self.beneficiary.json_ext, {"note": "keep"})
 
     def test_an_assessment_is_saved_with_its_numbers_and_dates(self):
         upload, summary = upload_rows(self.assessor, self.benefit_plan, {

@@ -3,8 +3,11 @@
 Only the assessment keys are sent; they are merged into the beneficiary's current
 ``json_ext`` under a row lock, so a change made elsewhere since the page loaded (a
 KYC approval, say) is kept, and the status is the record's own. A new or changed
-result or note is dated today and signed by the user. The save goes through the
-beneficiary services, as an update task when the beneficiary mutations create tasks.
+result or note is dated today and signed by the user, and is refused until the
+beneficiary's tranche one is paid in full, so tranche two only counts an assessment
+made after the money and the equipment or service were received. The save goes
+through the beneficiary services, as an update task when the beneficiary mutations
+create tasks.
 """
 import datetime
 import math
@@ -35,7 +38,7 @@ def record_utilisation(user, model, beneficiary_id, values):
             raise ValidationError(_("The beneficiary was not found."))
         current = as_json_ext(beneficiary.json_ext)
         json_ext = _assessed(current, values, user)
-        check_protected_changes(user, current, json_ext)
+        check_protected_changes(user, current, json_ext, beneficiary)
         data = {"id": beneficiary.id, "benefit_plan_id": beneficiary.benefit_plan_id,
                 "status": beneficiary.status, "json_ext": json_ext}
         if is_group:

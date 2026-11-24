@@ -1,7 +1,9 @@
 import uuid
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from calculation.apps import CALCULATION_RULES
@@ -17,6 +19,7 @@ from payroll.models import (
     Payroll,
     PayrollBenefitConsumption,
 )
+from social_protection.apps import SocialProtectionConfig
 from social_protection.models import Beneficiary, BenefitPlan
 
 from calcrule_attendance_grant.calculation_rule import AttendanceGrantCalculationRule
@@ -28,6 +31,8 @@ from calcrule_attendance_grant.tests.helpers import (
     create_participant,
     create_training,
 )
+from calcrule_attendance_grant.tests.test_protected_fields import user_with
+from calcrule_attendance_grant.utilisation import record_utilisation
 
 STRATEGY_LOGGER = "calcrule_attendance_grant.strategy"
 
@@ -424,6 +429,17 @@ class TrancheTwoTest(AttendanceGrantRunMixin, TestCase):
                 payroll, output = self.run_tranche_two()
                 self.assertFalse(self.benefits(payroll).exists())
                 self.assertIn("tranche one has no benefit for its in_kind (500.00) part", output)
+
+    def test_the_utilization_is_recorded_only_once_tranche_one_is_paid_in_full(self):
+        assessor = user_with("ag_t2_assessor", "gql_utilization_assessment_perms")
+        self.pay_tranche_one(reconcile=False)
+        with patch.object(SocialProtectionConfig, "gql_check_beneficiary_crud", False):
+            with self.assertRaisesMessage(ValidationError, "tranche one is not reconciled yet"):
+                record_utilisation(assessor, Beneficiary, self.mixed.id, {"utilization_percentage": 90})
+            BenefitConsumption.objects.update(status=BenefitConsumptionStatus.RECONCILED)
+            record_utilisation(assessor, Beneficiary, self.mixed.id, {"utilization_percentage": 90})
+        payroll, _ = self.run_tranche_two()
+        self.assertEqual(self.benefits(payroll).get().amount, Decimal("300.00"))
 
     def test_the_utilization_assessment_must_meet_the_plan(self):
         self.pay_tranche_one()

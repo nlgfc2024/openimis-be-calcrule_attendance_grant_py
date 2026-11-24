@@ -6,6 +6,7 @@ from django.test import TestCase
 
 from core.test_helpers import LogInHelper
 from social_protection.apps import SocialProtectionConfig
+from payroll.models import BenefitConsumptionStatus
 from social_protection.models import Beneficiary, BeneficiaryStatus
 from tasks_management.models import Task
 
@@ -26,6 +27,14 @@ class RecordUtilisationTest(TestCase):
 
     def setUp(self):
         self.beneficiary = create_participant(self.assessor, self.benefit_plan, 'Assessed', {"note": "keep"})
+        # Tranche one paid in full; TrancheTwoTest records an assessment against real benefits.
+        self.tranche_one = [{"grant_component": "cash", "grant_types": ["CASH"], "grant_amount": 1000.0,
+                             "tranche_share": 700.0, "cash_amount": 700.0,
+                             "_status": BenefitConsumptionStatus.RECONCILED}]
+        patcher = patch("calcrule_attendance_grant.strategy.tranche_benefits",
+                        side_effect=lambda *args: {str(self.beneficiary.id): self.tranche_one})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def record(self, values, user=None):
         return record_utilisation(user or self.assessor, Beneficiary, self.beneficiary.id, values)
@@ -48,6 +57,21 @@ class RecordUtilisationTest(TestCase):
         self.record({"utilization_percentage": None})
         self.beneficiary.refresh_from_db()
         self.assertEqual(self.beneficiary.json_ext, {"note": "keep"})
+
+    def test_an_assessment_waits_for_tranche_one_to_be_paid_in_full(self):
+        self.tranche_one[0]["_status"] = BenefitConsumptionStatus.APPROVE_FOR_PAYMENT
+        with self.assertRaisesMessage(
+                ValidationError, "The utilization can be assessed only once tranche one is paid in full: "
+                                 "tranche one is not reconciled yet (1 of 1 part(s) not RECONCILED)."):
+            self.record({"utilization_percentage": 80})
+        self.tranche_one.clear()
+        with self.assertRaisesMessage(ValidationError, "no tranche-one payment of the programme"):
+            self.record({"utilization_confirmed": "YES"})
+        # Clearing an assessment is allowed: it adds nothing tranche two would count.
+        Beneficiary.objects.filter(id=self.beneficiary.id).update(json_ext={"utilization_percentage": 80})
+        self.record({"utilization_percentage": None})
+        self.beneficiary.refresh_from_db()
+        self.assertEqual(self.beneficiary.json_ext, {})
 
     def test_values_and_rights_are_checked(self):
         cases = {

@@ -172,7 +172,7 @@ mutations accept the whole `json_ext`, so the module protects them:
 |---|---|
 | Grant: `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference` | Only through a plan approval (below): submitted with right `210001`. |
 | Decision: `business_plan_status`, `plan_approved_on`, `plan_approved_by`, `plan_approved_by_id`, `plan_rejection_reason` | Only through a plan approval: recorded when a user with right `210003` decides. |
-| Utilization: `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` | Saved directly by users with right `210002`, from the beneficiary page with the `recordUtilisationAssessment` mutation (below) or the upload. A result needs `utilization_assessed_on` and `utilization_assessed_by`. |
+| Utilization: `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` | Saved directly by users with right `210002`, from the beneficiary page with the `recordUtilisationAssessment` mutation (below) or the upload. A result needs `utilization_assessed_on` and `utilization_assessed_by`, and a new or changed one is refused until the beneficiary's tranche one is paid in full (as in [Tranche two](#tranche-two), point 1), so tranche two counts only an assessment made after the money and the equipment or service were received. |
 
 Before-hooks on `beneficiary_service.create` / `update` and
 `group_beneficiary_service.create` / `update` reject any other change to these keys,
@@ -227,8 +227,8 @@ The `recordUtilisationAssessment` mutation (`id`, `isGroup`, `jsonExt` with
 right `210002` and access to the programme. It merges only these keys into the
 beneficiary's current `json_ext` under a row lock, so a change made elsewhere since
 the page loaded is kept, and keeps the record's own status. A new or changed result
-or note is dated today and signed by the user; clearing the result removes the date
-and author. It saves through the beneficiary services, as an update task when the
+or note is dated today and signed by the user, and is refused until tranche one is
+paid in full; clearing the result removes the date and author. It saves through the beneficiary services, as an update task when the
 beneficiary update mutations create tasks (`gql_check_beneficiary_crud`,
 `gql_check_group_beneficiary_crud`).
 
@@ -260,7 +260,8 @@ either grant details or utilization assessments:
   upload ends as `FAIL`.
 - **Utilization assessments** (`utilization_percentage` or `utilization_confirmed`,
   `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes`) are saved
-  through the beneficiary services. For UMEP, with
+  through the beneficiary services. A row for a beneficiary whose tranche one is not
+  paid in full yet is invalid. For UMEP, with
   `enable_maker_checker_for_beneficiary_update` on, each row becomes a beneficiary
   update task. Household beneficiaries have no update task, so UPG and RMEP rows are
   saved directly.
