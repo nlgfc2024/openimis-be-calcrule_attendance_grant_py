@@ -390,13 +390,40 @@ class TrancheTwoTest(AttendanceGrantRunMixin, TestCase):
         self.assertEqual(self.benefits(payroll).get().amount, Decimal("400.00"))
 
     def test_tranche_one_must_be_reconciled_in_every_part(self):
-        self.pay_tranche_one(reconcile=False)
-        BenefitConsumption.objects.filter(individual=self.mixed.individual, type="CASH").update(
-            status=BenefitConsumptionStatus.RECONCILED)
-        self.assess(self.mixed, utilization_percentage=90, **self.ASSESSED)
-        payroll, output = self.run_tranche_two()
-        self.assertFalse(self.benefits(payroll).exists())
-        self.assertIn("tranche one is not reconciled yet (1 of 2 part(s) not RECONCILED)", output)
+        for reconciled_part in ("CASH", "EQUIPMENT"):
+            with self.subTest(reconciled_part=reconciled_part):
+                BenefitConsumption.objects.update(is_deleted=True)
+                self.pay_tranche_one(reconcile=False)
+                BenefitConsumption.objects.filter(individual=self.mixed.individual, type=reconciled_part).update(
+                    status=BenefitConsumptionStatus.RECONCILED)
+                self.assess(self.mixed, utilization_percentage=90, **self.ASSESSED)
+                payroll, output = self.run_tranche_two()
+                self.assertFalse(self.benefits(payroll).exists())
+                self.assertIn("tranche one is not reconciled yet (1 of 2 part(s) not RECONCILED)", output)
+
+    def test_tranche_one_needs_a_benefit_for_every_part_of_its_split(self):
+        """Mixed's tranche one is 700: 200 in cash and 500 in equipment, paid by two plans."""
+        for paid_component, missing in (("in_kind", "cash (200.00)"), ("cash", "in_kind (500.00)")):
+            with self.subTest(missing=missing):
+                BenefitConsumption.objects.update(is_deleted=True)
+                self.run_payroll(self.payment_plan(grant_component=paid_component))
+                BenefitConsumption.objects.filter(is_deleted=False).update(status=BenefitConsumptionStatus.RECONCILED)
+                self.assess(self.mixed, utilization_percentage=90, **self.ASSESSED)
+                payroll, output = self.run_tranche_two()
+                self.assertFalse(self.benefits(payroll).exists())
+                self.assertIn("tranche one has no benefit for its %s part" % missing, output)
+
+    def test_a_rejected_or_deleted_part_leaves_tranche_one_incomplete(self):
+        changes = {"rejected": {"status": BenefitConsumptionStatus.REJECTED}, "deleted": {"is_deleted": True}}
+        for change, fields in changes.items():
+            with self.subTest(change=change):
+                BenefitConsumption.objects.update(is_deleted=True)
+                self.pay_tranche_one()
+                BenefitConsumption.objects.filter(individual=self.mixed.individual, type="EQUIPMENT").update(**fields)
+                self.assess(self.mixed, utilization_percentage=90, **self.ASSESSED)
+                payroll, output = self.run_tranche_two()
+                self.assertFalse(self.benefits(payroll).exists())
+                self.assertIn("tranche one has no benefit for its in_kind (500.00) part", output)
 
     def test_the_utilization_assessment_must_meet_the_plan(self):
         self.pay_tranche_one()
