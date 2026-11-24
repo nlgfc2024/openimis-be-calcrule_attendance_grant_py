@@ -32,7 +32,7 @@ from calcrule_attendance_grant.grants import (
     resolve_grant,
 )
 from calcrule_attendance_grant.parameters import GRANT_SOURCE_PAYMENT_PLAN, GrantParameters
-from calcrule_attendance_grant.utilization import utilization_shortfall
+from calcrule_attendance_grant.tranche_two import utilization_shortfall
 
 logger = logging.getLogger(__name__)
 
