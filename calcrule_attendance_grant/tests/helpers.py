@@ -25,6 +25,7 @@ from project_social_protection.tests.test_helpers import create_project
 from calcrule_attendance_grant.attendance import TRAINING_PROJECT_TYPE
 from calcrule_attendance_grant.parameters import GrantParameters
 from calcrule_attendance_grant.programme import ProgrammeSettings
+from calcrule_attendance_grant.protected_fields import applying_plan_decision
 
 
 def create_programme(user, code, json_ext=None, plan_type='INDIVIDUAL'):
@@ -70,13 +71,16 @@ def attend_household(user, household, training, topics):
 
 
 def create_participant(user, benefit_plan, first_name, json_ext=None):
+    """An ACTIVE individual beneficiary. Grant and plan keys in ``json_ext`` are set as
+    if a plan approval had recorded them."""
     individual = create_individual(user.username, payload_override={'first_name': first_name})
-    result = BeneficiaryService(user).create({
-        "individual_id": individual.id,
-        "benefit_plan_id": benefit_plan.id,
-        "status": BeneficiaryStatus.ACTIVE,
-        "json_ext": json_ext or {},
-    })
+    with applying_plan_decision():
+        result = BeneficiaryService(user).create({
+            "individual_id": individual.id,
+            "benefit_plan_id": benefit_plan.id,
+            "status": BeneficiaryStatus.ACTIVE,
+            "json_ext": json_ext or {},
+        })
     assert result.get('success'), result
     return Beneficiary.objects.get(uuid=result['data']['uuid'])
 

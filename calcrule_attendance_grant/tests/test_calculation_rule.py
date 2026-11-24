@@ -45,7 +45,8 @@ class AttendanceGrantRegistrationTest(TestCase):
         )
 
 
-APPROVED = {"business_plan_status": "APPROVED", "plan_approved_on": "2026-10-01", "plan_approved_by_id": "approver"}
+APPROVED = {"business_plan_status": "APPROVED", "plan_approved_on": "2026-10-01", "plan_approved_by": "Committee",
+            "plan_approved_by_id": "approver"}
 
 
 class AttendanceGrantRunMixin:

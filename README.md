@@ -133,6 +133,142 @@ reconciliation file: the in-kind amounts for the PIU team on an `in_kind` plan.
   example an in-kind grant type without its tranche-one amount next to a recorded
   cash amount.
 
+## Protected beneficiary fields
+
+The keys that size and release the grant payments sit on the beneficiary's
+`json_ext` (`GroupBeneficiary` for UPG and RMEP, `Beneficiary` for UMEP). The
+beneficiary forms render every `json_ext` key as an editable field, and the update
+mutations accept the whole `json_ext`, so the module protects them:
+
+| Keys | How they change |
+|---|---|
+| Grant: `grant_types`, `approved_grant_amount`, `tranche_1_cash_amount`, `tranche_1_equipment_amount`, `tranche_1_service_amount`, `tranche_2_cash_amount`, `tranche_2_equipment_amount`, `tranche_2_service_amount`, `business_plan_reference` | Only through a plan approval (below): submitted with right `210001`. |
+| Decision: `business_plan_status`, `plan_approved_on`, `plan_approved_by`, `plan_approved_by_id`, `plan_rejection_reason` | Only through a plan approval: recorded when a user with right `210003` decides. |
+| Utilization: `utilization_percentage`, `utilization_confirmed`, `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes` | Saved directly by users with right `210002`, from the beneficiary page with the `recordUtilisationAssessment` mutation (below) or the upload. A result needs `utilization_assessed_on` and `utilization_assessed_by`. |
+
+Before-hooks on `beneficiary_service.create` / `update` and
+`group_beneficiary_service.create` / `update` reject any other change to these keys,
+including by administrators, and generic beneficiary update tasks cannot carry
+grant or decision keys. Unchanged values pass, so other fields can still be saved;
+values are compared by meaning, so `700`, `700.0` and `"700"` are the same. With
+maker-checker, a utilization change is checked when the update task is created and
+again when each approver approves it; rejecting a generic task needs no right.
+
+### Plan approval
+
+Plan approval uses the CoreMIS maker-checker tasks:
+
+1. A user with `210001` submits a beneficiary's grant keys with the
+   `submitBeneficiaryPlan` mutation (`id`, `isGroup`, `jsonExt`). The proposal is
+   checked (grant types the programme allows; amounts as numbers, at most two
+   decimals, the grant above 0) and becomes a task with source and business event
+   `calcrule_attendance_grant.plan_approval`, holding the proposed values. The
+   beneficiary does not change yet. Only one approval can be open per beneficiary:
+   the beneficiary is locked while a submission is checked and created, so two
+   requests cannot both create one. Once any part of the first tranche is paid, the
+   grant types, amount and tranche amounts can no longer change; the business plan
+   reference can.
+2. The task goes to the task group whose `task_sources` include
+   `calcrule_attendance_grant.plan_approval`. Its executors approve or reject it with
+   the standard task resolution, under the group's completion policy. Deciding needs
+   right `210003`, access to every programme the task touches, and a place among the
+   group's executors; IMIS administrators may decide any approval. A rejection needs a reason, given as the resolution's
+   `additional_data` (`{"reason": "..."}`).
+3. When the task completes, the proposed values are saved with
+   `business_plan_status = APPROVED`, and the user who completed it is recorded as
+   `plan_approved_by` (name), `plan_approved_by_id` and `plan_approved_on` (today).
+   When it fails, the proposal is dropped; a plan that was never approved gets
+   `business_plan_status = REJECTED` and the reason as `plan_rejection_reason`, while
+   a rejected change to an approved plan leaves the approval as it was, with the
+   reason on the task. A decision is saved on all of a task's beneficiaries or none;
+   an upload whose decision cannot be saved ends as `FAIL` with the error.
+
+Who may submit and who may decide is set by roles and task groups, as elsewhere in
+CoreMIS: an administrator can let one user do both, or give the decision to others.
+
+The task data names each beneficiary (`label`: the person's name or the household
+code) for the reviewer. The `pendingBeneficiaryPlanApproval(beneficiaryId, isGroup)`
+query returns a beneficiary's waiting approval (task, form or upload, submitter,
+date and proposed values) to users holding any of the three rights, since makers
+cannot see tasks outside their task groups.
+
+### Utilization assessment from the beneficiary page
+
+The `recordUtilisationAssessment` mutation (`id`, `isGroup`, `jsonExt` with
+`utilization_percentage` or `utilization_confirmed`, and `utilization_notes`) needs
+right `210002` and access to the programme. It merges only these keys into the
+beneficiary's current `json_ext` under a row lock, so a change made elsewhere since
+the page loaded is kept, and keeps the record's own status. A new or changed result
+or note is dated today and signed by the user; clearing the result removes the date
+and author. It saves through the beneficiary services, as an update task when the
+beneficiary update mutations create tasks (`gql_check_beneficiary_crud`,
+`gql_check_group_beneficiary_crud`).
+
+The generic "Python Beneficiaries Update" upload writes `json_ext` in SQL, so these
+hooks do not see it. It only writes keys declared in the programme's
+`beneficiary_data_schema`, so do not declare the grant and decision keys there.
+
+**Deployment:** assign `210001` to the roles that enter grant details, `210003` to
+the roles that approve business plans, and `210002` to the roles that record
+utilization assessments. Create a task group with
+`{"task_sources": ["calcrule_attendance_grant.plan_approval"]}` and add the approvers
+as its executors.
+
+## Grant and utilization upload
+
+The module registers the upload workflow "Python Beneficiary Grant and Utilization
+Update" in the `socialProtection` group, so it appears in the programme's existing
+beneficiary upload dialog for GROUP and INDIVIDUAL programmes alike. A file holds
+either grant details or utilization assessments:
+
+- **Grant details** (`grant_types`, `approved_grant_amount`, the per-tranche amounts,
+  `business_plan_reference`) go for approval. The file's valid rows become one plan
+  approval task (business event `calcrule_attendance_grant.plan_approval_upload`,
+  task source `calcrule_attendance_grant.plan_approval`), and the upload waits as
+  `WAITING_FOR_VERIFICATION`. Nothing is saved until it is decided, as in
+  [Plan approval](#plan-approval): approval saves every row with `APPROVED` and the
+  approver, and the upload ends as `SUCCESS`, or `PARTIAL_SUCCESS` when some rows
+  were invalid; rejection records `REJECTED` and the reason on every row, and the
+  upload ends as `FAIL`.
+- **Utilization assessments** (`utilization_percentage` or `utilization_confirmed`,
+  `utilization_assessed_on`, `utilization_assessed_by`, `utilization_notes`) are saved
+  through the beneficiary services. For UMEP, with
+  `enable_maker_checker_for_beneficiary_update` on, each row becomes a beneficiary
+  update task. Household beneficiaries have no update task, so UPG and RMEP rows are
+  saved directly.
+
+Every file:
+
+- needs an `ID` column: the GroupBeneficiary ID for UPG and RMEP, the Beneficiary ID
+  for UMEP. Any other column must be a grant or utilization key. Plan status and
+  approval columns are refused (the approval records them), as are unknown columns
+  and files that mix grant and utilization columns; a refused file changes nothing.
+- needs access to the programme and the right for its columns: `210001` for grant
+  details, `210002` for utilization, or the whole upload is refused.
+- is checked row by row: the beneficiary belongs to the programme and appears in one
+  row only; a grant row has at least one value, its beneficiary has no other
+  approval waiting, and it does not change the grant of a beneficiary whose first
+  tranche is being paid (the file's beneficiaries are locked until its task is
+  created); `approved_grant_amount` is positive and per-tranche amounts are 0
+  or more, with at most two decimals; `utilization_confirmed` is `YES` or `NO`;
+  `utilization_percentage` is from 0 to 100; dates are `YYYY-MM-DD` or spreadsheet
+  dates; a utilization result has its date and author.
+- reads `grant_types` as a semicolon-separated list such as `CASH;EQUIPMENT`, limited
+  to the programme's `allowed_grant_types` and stored as a JSON list. A per-tranche
+  amount can be non-zero only for a recorded grant type, and a grant without cash has
+  no tranche-two amounts. Whether a tranche adds up to its share is checked by the
+  payroll, against the payment plan's percentage.
+- merges only the submitted keys, as numbers where they are numbers. A blank cell is
+  not submitted, so an upload never clears a value.
+
+Invalid rows are listed with their errors in the existing invalid-items download.
+
+**Deployment:** do not declare the grant, decision or utilization keys in the
+programme's `beneficiary_data_schema`: this upload does not need them there, and the
+generic "Python Beneficiaries Update" upload would then write them without the
+rights or the approval. Set `allowed_grant_types` to `["CASH"]` for UPG,
+`["CASH", "EQUIPMENT"]` for RMEP and all three for UMEP.
+
 ## Settings
 
 PaymentPlan parameters, entered on the Payment Plan form and stored under
@@ -155,3 +291,11 @@ Programme settings, on `BenefitPlan.json_ext`:
 |---|---|
 | `allowed_grant_types` | Required. `["CASH"]` for UPG, `["CASH", "EQUIPMENT"]` for RMEP, all three for UMEP. |
 | `training_disqualification_percentage` | Set for UMEP (90): only COMPLETED trainings count. |
+
+Module settings (`ModuleConfiguration` for `calcrule_attendance_grant`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `gql_plans_and_grants_perms` | `["210001"]` | Right to submit grant details for approval. |
+| `gql_utilization_assessment_perms` | `["210002"]` | Right to change the utilization keys. |
+| `gql_plan_approval_perms` | `["210003"]` | Right to approve or reject submitted business plans. |
