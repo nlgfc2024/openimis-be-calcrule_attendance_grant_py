@@ -22,7 +22,6 @@ from calcrule_attendance_grant.converters import (
 )
 from calcrule_attendance_grant.grants import (
     GRANT_COMPONENT_IN_KIND,
-    GRANT_COMPONENTS,
     GRANT_TYPES,
     IN_KIND_TYPES,
     CASH,
@@ -33,7 +32,7 @@ from calcrule_attendance_grant.grants import (
     resolve_grant,
 )
 from calcrule_attendance_grant.parameters import GRANT_SOURCE_PAYMENT_PLAN, GrantParameters
-from calcrule_attendance_grant.tranche_two import utilization_shortfall
+from calcrule_attendance_grant.tranche_two import tranche_one_shortfall, utilization_shortfall
 
 logger = logging.getLogger(__name__)
 
@@ -211,20 +210,10 @@ class AttendanceGrantStrategy:
     @staticmethod
     def _tranche_two_grant(records, params):
         """(reason, None) when tranche two cannot be paid, else (None, its Grant)."""
-        if not records:
-            return "no tranche-one payment of the programme", None
+        reason = tranche_one_shortfall(records)
+        if reason:
+            return reason, None
         recorded = grant_from_record(records[0])
-        # Every part of the recorded split needs its own benefit: a part never paid, or
-        # whose benefit was rejected or deleted, leaves tranche one incomplete.
-        paid_components = {record.get("grant_component") for record in records}
-        missing = ["%s (%s)" % (component, recorded.part(component)) for component in GRANT_COMPONENTS
-                   if recorded.part(component) > 0 and component not in paid_components]
-        if missing:
-            return "tranche one has no benefit for its %s part" % " and ".join(missing), None
-        unreconciled = [record for record in records if record.get("_status") != BenefitConsumptionStatus.RECONCILED]
-        if unreconciled:
-            return ("tranche one is not reconciled yet (%s of %s part(s) not RECONCILED)"
-                    % (len(unreconciled), len(records))), None
         if CASH not in recorded.grant_types:
             return "a grant without cash was given in full at tranche one", None
         # The rest of the grant, not its own rounded percentage, so the tranches add up
