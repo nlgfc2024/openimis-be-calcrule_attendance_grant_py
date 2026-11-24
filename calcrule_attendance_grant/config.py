@@ -64,7 +64,7 @@ CLASS_RULE_PARAM_VALIDATION = [
                 "rights": PAYMENT_PLAN_RIGHTS,
                 "relevance": "True",
                 "condition": "INPUT>0",
-                # Blank: 70 for tranche one, 30 for tranche two.
+                # Blank: 70 for tranche one; tranche two pays the rest of each grant.
                 "default": "",
             },
             {

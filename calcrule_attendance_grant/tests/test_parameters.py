@@ -145,8 +145,13 @@ class GrantParametersTest(SimpleTestCase):
 
     def test_a_tranche_two_plan_pays_cash_against_a_utilization_measure(self):
         params = self.parse(tranche=2, utilization_measure="percentage", grant_amount_source="null", grant_amount="")
+        # A blank percentage pays the rest of each grant after tranche one.
         self.assertEqual((params.tranche, params.tranche_percentage, params.minimum_utilization_percentage),
-                         (2, Decimal("30"), Decimal("80")))
+                         (2, None, Decimal("80")))
+        self.assertEqual(self.parse(tranche=2, utilization_measure="percentage", tranche_percentage="null")
+                         .tranche_percentage, None)
+        self.assertEqual(self.parse(tranche=2, utilization_measure="percentage", tranche_percentage="30")
+                         .tranche_percentage, Decimal("30"))
         self.assertEqual(self.parse(tranche="2", utilization_measure="yes_no").utilization_measure, "yes_no")
         self.assert_configuration_error("a tranche-two plan needs utilization_measure", rule=self.rule(tranche=2))
         self.assert_configuration_error("tranche two is paid in cash only",

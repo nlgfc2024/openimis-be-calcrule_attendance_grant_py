@@ -25,6 +25,7 @@ from calcrule_attendance_grant.grants import (
     GRANT_TYPES,
     IN_KIND_TYPES,
     CASH,
+    FULL_SHARE,
     Grant,
     grant_from_record,
     to_cents,
@@ -157,8 +158,8 @@ class AttendanceGrantStrategy:
     def _calculate_tranche_two(cls, calculation, payment_plan, params, payees, **kwargs):
         """Pay the second tranche, all cash, to beneficiaries whose first tranche is
         reconciled and whose utilization assessment meets the plan. Attendance, plan
-        approval and grant types are not checked again: tranche one required them, and
-        its recorded grant sizes this share."""
+        approval and grant types are not checked again: tranche one required them. The
+        share is the rest of the grant tranche one recorded, so the two add up to it."""
         payroll = kwargs.get("payroll")
         user_id, _start_date, end_date, payment_cycle = \
             calculation.get_payment_cycle_parameters(**kwargs)
@@ -166,6 +167,7 @@ class AttendanceGrantStrategy:
         ids = [payee.beneficiary.id for payee in payees]
         first = tranche_benefits(payment_plan.benefit_plan_id, 1, ids)
         second = tranche_benefits(payment_plan.benefit_plan_id, 2, ids)
+        cls._check_tranche_two_percentage(payment_plan, params, first)
 
         paid = 0
         for payee in payees:
@@ -217,13 +219,15 @@ class AttendanceGrantStrategy:
         recorded = grant_from_record(records[0])
         if CASH not in recorded.grant_types:
             return "a grant without cash was given in full at tranche one", None
-        share = to_cents(recorded.grant_amount * params.tranche_percentage / 100)
+        # The rest of the grant, not its own rounded percentage, so the tranches add up
+        # to the grant to the cent.
+        share = recorded.grant_amount - recorded.share
         if share <= 0:
-            return "the tranche-two share of %s rounds to 0" % recorded.grant_amount, None
+            return "nothing of the grant of %s is left after tranche one" % recorded.grant_amount, None
         # Tranche two is paid in cash only: the in-kind part was delivered with tranche one.
         amounts = {grant_type: share if grant_type == CASH else Decimal("0.00") for grant_type in recorded.grant_types}
         return None, Grant(grant_types=recorded.grant_types, grant_amount=recorded.grant_amount,
-                           percentage=params.tranche_percentage, share=share, amounts=amounts)
+                           percentage=FULL_SHARE - recorded.percentage, share=share, amounts=amounts)
 
     @staticmethod
     def _log_grant_changes(payment_plan, payee, json_ext, grant):
@@ -275,7 +279,10 @@ class AttendanceGrantStrategy:
     @staticmethod
     def _check_tranche_percentage(payment_plan, params):
         """A tranche's cash and in-kind plans must use the same tranche percentage, or
-        their parts would not add up to one share."""
+        their parts would not add up to one share. Tranche two has only cash plans,
+        each checked against tranche one instead (_check_tranche_two_percentage)."""
+        if params.tranche == 2:
+            return
         others = [
             plan for plan in _attendance_grant_plans(payment_plan)
             if plan.id != payment_plan.id and GrantParameters.tranche_of(_plan_rule(plan)) == params.tranche
@@ -289,6 +296,29 @@ class AttendanceGrantStrategy:
                 % (payment_plan.code, f"{params.tranche_percentage.normalize():f}", ", ".join(
                     "%s (%s)" % (plan.code, _format(_plan_tranche_percentage(plan))) for plan in others))
             )
+
+    @staticmethod
+    def _check_tranche_two_percentage(payment_plan, params, first):
+        """A tranche-two plan that sets its percentage must make 100 with the percentage
+        tranche one recorded for its beneficiaries, or the tranches would not add up to
+        the grant. Grants without cash were paid in full at tranche one and are left out."""
+        if params.tranche_percentage is None:
+            return
+        recorded = sorted({
+            grant.percentage for grant in (grant_from_record(records[0]) for records in first.values() if records)
+            if CASH in grant.grant_types
+        })
+        wrong = [percentage for percentage in recorded if percentage + params.tranche_percentage != FULL_SHARE]
+        if not wrong:
+            return
+        fix = "Leave tranche_percentage blank to pay the rest of each grant"
+        if len(recorded) == 1:
+            fix += ", or set it to %s" % _format(FULL_SHARE - recorded[0])
+        raise AttendanceGrantConfigurationError(
+            "Payment plan %s cannot be calculated with the attendance-grant rule: its tranche_percentage (%s) "
+            "and the tranche-one percentage recorded for its beneficiaries (%s) do not add up to 100. %s."
+            % (payment_plan.code, _format(params.tranche_percentage), ", ".join(map(_format, wrong)), fix)
+        )
 
     @staticmethod
     def _check_household_payee(payment_plan):

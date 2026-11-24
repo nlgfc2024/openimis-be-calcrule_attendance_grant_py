@@ -15,9 +15,9 @@ GRANT_SOURCE_PAYMENT_PLAN = "payment_plan"
 GRANT_SOURCE_BENEFICIARY_JSON = "beneficiary_json"
 GRANT_SOURCES = (GRANT_SOURCE_PAYMENT_PLAN, GRANT_SOURCE_BENEFICIARY_JSON)
 
-# Each tranche's share of a grant that includes cash, unless the plan sets its own.
-DEFAULT_TRANCHE_PERCENTAGES = {1: Decimal("70"), 2: Decimal("30")}
-DEFAULT_TRANCHE_PERCENTAGE = DEFAULT_TRANCHE_PERCENTAGES[1]
+# Tranche one's share of a grant that includes cash, unless the plan sets its own.
+# Tranche two pays the rest of the grant.
+DEFAULT_TRANCHE_PERCENTAGE = Decimal("70")
 DEFAULT_MINIMUM_ATTENDANCE_PERCENTAGE = Decimal("80")
 DEFAULT_MINIMUM_UTILIZATION_PERCENTAGE = Decimal("80")
 TRANCHES = (1, 2)
@@ -48,6 +48,7 @@ class GrantParameters:
     grant_component: str
     grant_amount_source: str
     grant_amount: Decimal
+    # None on a tranche-two plan that leaves it blank: it pays the rest of each grant.
     tranche_percentage: Decimal
     minimum_attendance_percentage: Decimal
     # Settings of the programme (BenefitPlan) the plan pays.
@@ -99,9 +100,11 @@ class GrantParameters:
                     "is %s" % GRANT_SOURCE_PAYMENT_PLAN
                 )
 
-        tranche_percentage = cls._percentage(
-            rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGES[tranche], errors
-        )
+        if tranche == 2 and _is_blank(rule.get("tranche_percentage")):
+            # Tranche two pays the rest of each grant after its recorded tranche one.
+            tranche_percentage = None
+        else:
+            tranche_percentage = cls._percentage(rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGE, errors)
         # The modules come from each beneficiary's training, a tick always means
         # attended, and the programme decides which training status counts.
         programme = ProgrammeSettings.from_benefit_plan(payment_plan.benefit_plan, errors)
@@ -144,8 +147,8 @@ class GrantParameters:
 
     @classmethod
     def tranche_percentage_of(cls, rule):
-        """A plan's tranche percentage, its tranche's default when unset or invalid."""
-        return cls._percentage(rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGES[cls.tranche_of(rule)], [])
+        """A tranche-one plan's tranche percentage, the default when unset or invalid."""
+        return cls._percentage(rule, "tranche_percentage", DEFAULT_TRANCHE_PERCENTAGE, [])
 
     @classmethod
     def _minimum_attendance(cls, rule, programme, errors):
