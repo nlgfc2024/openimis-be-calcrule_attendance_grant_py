@@ -1,6 +1,6 @@
-"""The tranche-two utilization gate.
+"""The tranche-two gates: tranche one paid in full, and its utilization.
 
-Before the second tranche, the programme assesses how the first was used and records
+Tranche two waits until every part of tranche one was paid or delivered. Then, the programme assesses how the first was used and records
 it on the beneficiary's ``json_ext``: UPG and RMEP as ``utilization_percentage`` (the
 share of the first tranche used for its intended purpose), UMEP as
 ``utilization_confirmed`` (``YES`` or ``NO``), both with ``utilization_assessed_on``.
@@ -8,7 +8,33 @@ share of the first tranche used for its intended purpose), UMEP as
 import math
 from decimal import Decimal
 
+from payroll.models import BenefitConsumptionStatus
+
+from calcrule_attendance_grant.grants import GRANT_COMPONENTS, grant_from_record
 from calcrule_attendance_grant.parameters import UTILIZATION_PERCENTAGE
+
+
+def tranche_one_shortfall(records):
+    """Why the beneficiary's tranche one, its recorded benefits (strategy.tranche_benefits),
+    is not paid in full, or None.
+
+    Every part of the recorded split with a non-zero amount, cash and in-kind, needs its
+    own benefit: a part never paid, or whose benefit was rejected or deleted, leaves the
+    tranche incomplete. Every benefit must then be RECONCILED.
+    """
+    if not records:
+        return "no tranche-one payment of the programme"
+    recorded = grant_from_record(records[0])
+    paid_components = {record.get("grant_component") for record in records}
+    missing = ["%s (%s)" % (component, recorded.part(component)) for component in GRANT_COMPONENTS
+               if recorded.part(component) > 0 and component not in paid_components]
+    if missing:
+        return "tranche one has no benefit for its %s part" % " and ".join(missing)
+    unreconciled = [record for record in records if record.get("_status") != BenefitConsumptionStatus.RECONCILED]
+    if unreconciled:
+        return "tranche one is not reconciled yet (%s of %s part(s) not RECONCILED)" % (
+            len(unreconciled), len(records))
+    return None
 
 
 def utilization_shortfall(json_ext, measure, minimum_percentage):
