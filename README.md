@@ -117,9 +117,14 @@ plan of the programme, and pays the beneficiary when all of the following hold:
    `utilization_confirmed` is `YES` for `yes_no`.
 4. **No earlier tranche-two benefit**, other than a rejected or deleted one.
 
-Attendance, plan approval and grant types are not checked again. The share is
-`A x tranche_percentage`, with A and the grant types recorded on the tranche-one
-benefit, not the beneficiary's current values; a difference is logged. The benefit
+Attendance, plan approval and grant types are not checked again. The share is the
+rest of the grant: A minus the tranche-one share, with A, that share and the grant
+types recorded on the tranche-one benefit, not the beneficiary's current values; a
+difference is logged. The two tranches therefore add up to A to the cent, and the
+benefit records `100 - ` the tranche-one percentage as its `tranche_percentage`. A
+tranche-two plan that sets `tranche_percentage` must make 100 with the percentage
+tranche one recorded for its beneficiaries, or the run stops with a configuration
+error naming both. The benefit
 records `tranche` 2 in its `attendance_grant` block.
 
 ### What is recorded
@@ -302,7 +307,7 @@ empty choice (`null`) counts as not set.
 | `grant_component` | required | `cash` or `in_kind`: the part of each tranche this plan pays. Tranche two is `cash` only. |
 | `grant_amount_source` | required | `payment_plan` or `beneficiary_json`. |
 | `grant_amount` | required for `payment_plan` | Programme-wide grant amount. |
-| `tranche_percentage` | `70` for tranche one, `30` for tranche two | The tranche's share of A for grants that include cash. A tranche's cash and in-kind plans must use the same value: a plan whose value differs from another attendance-grant plan of the programme for the same tranche stops with a configuration error. |
+| `tranche_percentage` | `70` for tranche one; blank for tranche two pays the rest of each grant | Tranche one's share of A for grants that include cash. Tranche one's cash and in-kind plans must use the same value: a plan whose value differs from another tranche-one attendance-grant plan of the programme stops with a configuration error. A tranche-two plan may leave it blank; a value it sets must make 100 with the recorded tranche-one percentage (see Tranche two). |
 | `minimum_attendance_percentage` | `80`; required, and at least `training_disqualification_percentage`, for a programme that sets it (UMEP: 90) | Completion each module needs. |
 
 | `utilization_measure` | required for tranche two | `percentage` (UPG, RMEP) or `yes_no` (UMEP): how the beneficiary's utilization assessment releases tranche two. |

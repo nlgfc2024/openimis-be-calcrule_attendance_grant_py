@@ -328,12 +328,12 @@ class TrancheTwoTest(AttendanceGrantRunMixin, TestCase):
         cls.equipment_only = cls.participant('EquipmentOnly', {
             "grant_types": ["EQUIPMENT"], "approved_grant_amount": 800, "tranche_1_equipment_amount": 800})
 
-    def pay_tranche_one(self, reconcile=True):
-        self.run_payroll(self.payment_plan())
-        self.run_payroll(self.payment_plan(grant_component="in_kind"))
+    def pay_tranche_one(self, reconcile=True, **rule):
+        self.run_payroll(self.payment_plan(**rule))
+        self.run_payroll(self.payment_plan(grant_component="in_kind", **rule))
         if reconcile:
             BenefitConsumption.objects.filter(
-                individual__in=[self.mixed.individual, self.equipment_only.individual],
+                json_ext__attendance_grant__tranche=1,
             ).update(status=BenefitConsumptionStatus.RECONCILED)
 
     def assess(self, beneficiary, **values):
@@ -357,7 +357,37 @@ class TrancheTwoTest(AttendanceGrantRunMixin, TestCase):
                          (self.mixed.individual_id, Decimal("300.00"), "CASH"))
         self.assertEqual(benefit.json_ext["attendance_grant"]["tranche"], 2)
         self.assertEqual(benefit.json_ext["attendance_grant"]["cash_amount"], 300.0)
+        self.assertEqual(benefit.json_ext["attendance_grant"]["tranche_percentage"], 30.0)
         self.assertIn("a grant without cash was given in full at tranche one", output)
+
+    def test_the_tranches_add_up_to_the_grant_to_the_cent(self):
+        """70% and 30% of 100.05 round to 70.04 and 30.02; tranche two pays the rest."""
+        odd = self.participant('Odd', {"grant_types": ["CASH"], "approved_grant_amount": 100.05})
+        self.pay_tranche_one()
+        self.assess(odd, utilization_percentage=80, **self.ASSESSED)
+        payroll, _ = self.run_tranche_two()
+        first = BenefitConsumption.objects.get(individual=odd.individual, json_ext__attendance_grant__tranche=1)
+        second = self.benefits(payroll).get(individual=odd.individual)
+        self.assertEqual((first.amount, second.amount), (Decimal("70.04"), Decimal("30.01")))
+
+    def test_tranche_two_pays_the_rest_after_another_tranche_one_percentage(self):
+        self.pay_tranche_one(tranche_percentage="60")
+        self.assess(self.mixed, utilization_percentage=80, **self.ASSESSED)
+        payroll, _ = self.run_tranche_two()
+        benefit = self.benefits(payroll).get()
+        self.assertEqual(benefit.amount, Decimal("400.00"))
+        self.assertEqual(benefit.json_ext["attendance_grant"]["tranche_percentage"], 40.0)
+
+    def test_a_set_tranche_two_percentage_must_make_100_with_tranche_one(self):
+        self.pay_tranche_one(tranche_percentage="60")
+        self.assess(self.mixed, utilization_percentage=80, **self.ASSESSED)
+        with self.assertRaisesMessage(
+                AttendanceGrantConfigurationError,
+                "its tranche_percentage (30) and the tranche-one percentage recorded for its beneficiaries (60) "
+                "do not add up to 100. Leave tranche_percentage blank to pay the rest of each grant, or set it to 40."):
+            self.run_payroll(self.tranche_two(tranche_percentage="30"))
+        payroll, _ = self.run_tranche_two(tranche_percentage="40")
+        self.assertEqual(self.benefits(payroll).get().amount, Decimal("400.00"))
 
     def test_tranche_one_must_be_reconciled_in_every_part(self):
         self.pay_tranche_one(reconcile=False)
