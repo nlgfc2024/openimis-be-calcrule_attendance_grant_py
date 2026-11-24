@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
@@ -8,6 +10,7 @@ from social_protection.tests.test_helpers import create_benefit_plan, create_gro
 from tasks_management.models import Task
 from tasks_management.services import TaskService
 
+from calcrule_attendance_grant.protected_fields import tranche_one_shortfall_of
 from calcrule_attendance_grant.tests.helpers import create_participant, create_programme
 
 APPROVED_PLAN = {
@@ -24,7 +27,19 @@ def user_with(username, *perm_names):
     return create_test_interactive_user(username=username, roles=[role.id])
 
 
-class ProtectedFieldsTest(TestCase):
+class TrancheOnePaidMixin:
+    """Treat every beneficiary's tranche one as paid in full, as an assessment needs;
+    set ``self.tranche_one_shortfall.side_effect = tranche_one_shortfall_of`` for the
+    real check. TrancheTwoTest checks it against real benefits."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch("calcrule_attendance_grant.protected_fields.tranche_one_shortfall_of", return_value=None)
+        self.tranche_one_shortfall = patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class ProtectedFieldsTest(TrancheOnePaidMixin, TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.admin = LogInHelper().get_or_create_user_api()
@@ -72,6 +87,18 @@ class ProtectedFieldsTest(TestCase):
             self.update(self.assessor, {**APPROVED_PLAN, **ASSESSMENT, "utilization_assessed_by": " "})
         self.assertTrue(self.update(self.assessor, {**APPROVED_PLAN, **ASSESSMENT})["success"])
 
+    def test_an_assessment_waits_for_tranche_one_to_be_paid_in_full(self):
+        self.tranche_one_shortfall.side_effect = tranche_one_shortfall_of
+        with self.assertRaisesMessage(ValidationError, "The utilization can be assessed only once tranche one is "
+                                                       "paid in full: no tranche-one payment of the programme."):
+            self.update(self.assessor, {**APPROVED_PLAN, **ASSESSMENT})
+        individual = create_individual(self.clerk.username, {'first_name': 'NewAssessed'})
+        with self.assertRaisesMessage(ValidationError, "no tranche-one payment of the programme"):
+            BeneficiaryService(self.assessor).create({
+                "individual_id": individual.id, "benefit_plan_id": self.benefit_plan.id,
+                "status": BeneficiaryStatus.ACTIVE, "json_ext": ASSESSMENT})
+        self.tranche_one_shortfall.assert_any_call(None)
+
     def test_creating_a_beneficiary_with_plan_keys_is_refused(self):
         individual = create_individual(self.clerk.username, {'first_name': 'NewProtected'})
         data = {"individual_id": individual.id, "benefit_plan_id": self.benefit_plan.id,
@@ -91,7 +118,7 @@ class ProtectedFieldsTest(TestCase):
             GroupBeneficiaryService(self.planner).update(data)
 
 
-class GenericTaskProtectedFieldsTest(TestCase):
+class GenericTaskProtectedFieldsTest(TrancheOnePaidMixin, TestCase):
     """Generic beneficiary update tasks are checked when created and when approved."""
 
     @classmethod

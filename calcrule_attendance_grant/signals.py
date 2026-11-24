@@ -48,8 +48,8 @@ def protect_on_save(**kwargs):
     obj_data = _service_data(kwargs)
     if "json_ext" not in obj_data:
         return
-    current = _current_json_ext(service.OBJECT_TYPE, obj_data.get("id"))
-    check_protected_changes(service.user, current, obj_data["json_ext"])
+    beneficiary = _current(service.OBJECT_TYPE, obj_data.get("id"))
+    check_protected_changes(service.user, _json_ext(beneficiary), obj_data["json_ext"], beneficiary)
 
 
 def protect_on_task_create(**kwargs):
@@ -101,10 +101,10 @@ def _check_task(user, business_event, task_data, entity_id):
     incoming = (task_data or {}).get("incoming_data") or {}
     if "json_ext" not in incoming:
         return
-    current = {}
+    beneficiary = None
     if operation == "update":
-        current = _current_json_ext(_beneficiary_model(service_name), entity_id or incoming.get("id"))
-    check_protected_changes(user, current, incoming["json_ext"])
+        beneficiary = _current(_beneficiary_model(service_name), entity_id or incoming.get("id"))
+    check_protected_changes(user, _json_ext(beneficiary), incoming["json_ext"], beneficiary)
 
 
 def _service_data(kwargs):
@@ -119,7 +119,12 @@ def _beneficiary_model(service_name):
     return GroupBeneficiary if service_name == "GroupBeneficiaryService" else Beneficiary
 
 
-def _current_json_ext(model, obj_id):
+def _current(model, obj_id):
+    """The saved beneficiary being changed, or None for a new one."""
     if not obj_id:
-        return {}
-    return model.objects.filter(id=obj_id).values_list("json_ext", flat=True).first() or {}
+        return None
+    return model.objects.filter(id=obj_id).only("id", "benefit_plan_id", "json_ext").first()
+
+
+def _json_ext(beneficiary):
+    return (beneficiary.json_ext if beneficiary is not None else None) or {}

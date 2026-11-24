@@ -293,7 +293,7 @@ class GrantUtilizationUpload:
                 self._check_tranches(merged, patch, programme, error)
             else:
                 try:
-                    check_protected_changes(self.user, beneficiary.json_ext, merged)
+                    check_protected_changes(self.user, beneficiary.json_ext, merged, beneficiary)
                 except ValidationError as exc:
                     for message in exc.messages:
                         error(None, message)

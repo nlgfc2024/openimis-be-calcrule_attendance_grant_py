@@ -7,7 +7,10 @@ and the update mutations accept the whole json_ext, so these keys are protected:
   (see plan_approval): a user with the plans-and-grants right submits them, and a
   user with the plan approval right approves or rejects the submission. A direct
   save, or a generic beneficiary task, cannot change them.
-- The utilization keys are saved directly, by users with the utilization right.
+- The utilization keys are saved directly, by users with the utilization right, and
+  a new or changed result only once the beneficiary's tranche one is paid in full, so
+  tranche two counts only an assessment made after the money and the equipment or
+  service were received.
 
 Unchanged values always pass, so other fields of a record that has these keys can
 still be saved. Values are compared by meaning: 700, 700.0 and "700" are the same.
@@ -82,8 +85,9 @@ def changed_keys(current, incoming, keys):
     return [key for key in keys if _value(current, key) != _value(incoming, key)]
 
 
-def check_protected_changes(user, current_json_ext, incoming_json_ext):
-    """Raise ValidationError when ``user`` may not make this json_ext change."""
+def check_protected_changes(user, current_json_ext, incoming_json_ext, beneficiary=None):
+    """Raise ValidationError when ``user`` may not make this json_ext change to
+    ``beneficiary`` (with its ``id`` and ``benefit_plan_id``; None for a new one)."""
     current, incoming = as_json_ext(current_json_ext), as_json_ext(incoming_json_ext)
     errors = []
 
@@ -107,9 +111,25 @@ def check_protected_changes(user, current_json_ext, incoming_json_ext):
                        if _value(incoming, key) is None]
             if missing:
                 errors.append(_("A utilization result needs %s.") % " and ".join(missing))
+            reason = tranche_one_shortfall_of(beneficiary)
+            if reason:
+                errors.append(_(
+                    "The utilization can be assessed only once tranche one is paid in full: %s."
+                ) % reason)
 
     if errors:
         raise ValidationError(errors)
+
+
+def tranche_one_shortfall_of(beneficiary):
+    """Why ``beneficiary`` has not received its tranche one in full yet, or None."""
+    from calcrule_attendance_grant.strategy import tranche_benefits
+    from calcrule_attendance_grant.tranche_two import tranche_one_shortfall
+
+    records = None
+    if beneficiary is not None and beneficiary.id:
+        records = tranche_benefits(beneficiary.benefit_plan_id, 1, [beneficiary.id]).get(str(beneficiary.id))
+    return tranche_one_shortfall(records)
 
 
 def _value(json_ext, key):
