@@ -106,9 +106,11 @@ A plan with `tranche` 2 pays the rest of a grant with cash, in cash only. It fin
 beneficiary's tranche-one payments from what each benefit recorded, under any payment
 plan of the programme, and pays the beneficiary when all of the following hold:
 
-1. **Tranche one is reconciled.** The beneficiary has at least one tranche-one
-   benefit, and every one that was not rejected or deleted is RECONCILED: the cash was
-   paid and the equipment or service delivered.
+1. **Tranche one is reconciled.** Every part of the tranche-one split with a non-zero
+   amount, cash and in-kind, has a benefit that was not rejected or deleted, and every
+   such benefit is RECONCILED: the cash was paid and the equipment or service
+   delivered. A part that was never paid, or whose benefit was rejected or deleted,
+   keeps the beneficiary waiting.
 2. **The grant includes cash.** A grant without cash was given in full at tranche
    one, so the beneficiary is skipped.
 3. **The utilization assessment meets the plan.** `utilization_assessed_on` is set,
